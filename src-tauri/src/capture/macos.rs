@@ -1,7 +1,8 @@
 use crate::capture::{CaptureAdapter, CaptureError};
 use crate::models::{
-    AccessibilitySnapshot, ClaudeDetection, DiagnosticSaveResult, InspectorOptions,
-    SessionMetadata, VisibleTextBlock,
+    AccessibilitySnapshot, ChatExportOptions, ChatExportResult, ClaudeDetection,
+    DiagnosticSaveResult, InspectorOptions, SessionMetadata, VisibleContentCapture,
+    VisibleTextBlock,
 };
 
 pub struct MacOsCaptureAdapter;
@@ -60,6 +61,22 @@ impl CaptureAdapter for MacOsCaptureAdapter {
     ) -> Result<DiagnosticSaveResult, CaptureError> {
         Err(CaptureError::Diagnostic(
             "macOS runtime support is not implemented in Phase 2.".to_string(),
+        ))
+    }
+
+    fn capture_visible_content(&self) -> Result<VisibleContentCapture, CaptureError> {
+        Err(CaptureError::Native(
+            "macOS visible content capture is not implemented in Phase 2.".to_string(),
+        ))
+    }
+
+    fn export_chat_transcript(
+        &self,
+        _options: ChatExportOptions,
+    ) -> Result<ChatExportResult, CaptureError> {
+        Err(CaptureError::Native(
+            "Claude transcript export is currently implemented for Windows Claude Desktop sessions."
+                .to_string(),
         ))
     }
 }

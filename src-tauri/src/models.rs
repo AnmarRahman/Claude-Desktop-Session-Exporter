@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct DetectedProcess {
     pub pid: u32,
     pub name: String,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,4 +115,35 @@ pub struct VisibleTextBlock {
 pub struct DiagnosticSaveResult {
     pub path: String,
     pub warning: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VisibleContentCapture {
+    pub image_path: String,
+    pub text: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatExportMessage {
+    pub role: String,
+    pub text: String,
+    pub timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatExportResult {
+    pub title: String,
+    pub session_id: String,
+    pub source_type: String,
+    pub source_path: String,
+    pub markdown_path: String,
+    pub json_path: String,
+    pub message_count: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatExportOptions {
+    pub source: Option<String>,
 }

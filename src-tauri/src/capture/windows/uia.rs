@@ -4,6 +4,8 @@ use crate::models::{
     AccessibilityNode, AccessibilitySnapshot, Bounds, DetectedProcess, DetectedWindow,
     InspectorOptions,
 };
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 use uiautomation::patterns::{UITextPattern, UIValuePattern};
 use uiautomation::types::{Handle, UIProperty};
 use uiautomation::{UIAutomation, UIElement, UITreeWalker};
@@ -17,6 +19,10 @@ use windows_result::BOOL;
 const DEFAULT_MAX_DEPTH: usize = 12;
 const DEFAULT_MAX_ELEMENTS: usize = 5_000;
 const MAX_TEXT_PATTERN_CHARS: i32 = 20_000;
+const MIN_TOP_LEVEL_WIDTH: i32 = 320;
+const MIN_TOP_LEVEL_HEIGHT: i32 = 240;
+const UIA_COMMAND_TIMEOUT: Duration = Duration::from_secs(12);
+const UIA_TRAVERSAL_BUDGET: Duration = Duration::from_secs(8);
 
 struct TraversalState {
     max_depth: usize,
@@ -24,18 +30,51 @@ struct TraversalState {
     next_id: usize,
     element_count: usize,
     truncated: bool,
+    deadline: Instant,
 }
 
 pub fn find_claude_windows(
     processes: &[DetectedProcess],
 ) -> Result<Vec<DetectedWindow>, CaptureError> {
-    Ok(enumerate_top_level_windows(processes)
+    let mut windows = enumerate_top_level_windows(processes)
         .into_iter()
         .filter(|window| !window.detection_signals.is_empty())
-        .collect())
+        .collect::<Vec<_>>();
+    windows.sort_by(|left, right| window_rank(right).cmp(&window_rank(left)));
+    Ok(windows)
 }
 
 pub fn inspect_first_claude_window(
+    processes: &[DetectedProcess],
+    options: InspectorOptions,
+) -> Result<AccessibilitySnapshot, CaptureError> {
+    let processes = processes.to_vec();
+    let timeout_options = options.clone();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("claude-uia-inspector".to_string())
+        .spawn(move || {
+            let _ = sender.send(inspect_first_claude_window_on_uia_thread(
+                &processes, options,
+            ));
+        })
+        .map_err(|error| {
+            CaptureError::Native(format!("Failed to start UI Automation thread: {error}"))
+        })?;
+
+    match receiver.recv_timeout(UIA_COMMAND_TIMEOUT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(empty_snapshot(
+            timeout_options,
+            "UI Automation inspection timed out while reading the detected Claude Desktop window. Phase 2 finding: Claude was detected by process and HWND, but this window did not expose a readable UIA root before the timeout.",
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(CaptureError::Native(
+            "UI Automation thread stopped before returning a snapshot.".to_string(),
+        )),
+    }
+}
+
+fn inspect_first_claude_window_on_uia_thread(
     processes: &[DetectedProcess],
     options: InspectorOptions,
 ) -> Result<AccessibilitySnapshot, CaptureError> {
@@ -56,11 +95,18 @@ pub fn inspect_first_claude_window(
         window.hwnd.as_deref().and_then(parse_hwnd).ok_or_else(|| {
             CaptureError::Native("Claude HWND was missing or invalid.".to_string())
         })?;
-    let claude_root = automation
-        .element_from_handle(Handle::from(hwnd))
-        .map_err(native_error)?;
+    let target_summary = target_window_summary(&window);
+    let claude_root = match automation.element_from_handle(Handle::from(hwnd)) {
+        Ok(element) => element,
+        Err(error) => {
+            return Ok(empty_snapshot(
+                options,
+                &format!("UI Automation could not inspect {target_summary}: {error}"),
+            ));
+        }
+    };
 
-    let max_depth = options.max_depth.unwrap_or(DEFAULT_MAX_DEPTH).clamp(1, 30);
+    let max_depth = options.max_depth.unwrap_or(DEFAULT_MAX_DEPTH).clamp(0, 30);
     let max_elements = options
         .max_elements
         .unwrap_or(DEFAULT_MAX_ELEMENTS)
@@ -71,16 +117,24 @@ pub fn inspect_first_claude_window(
         next_id: 1,
         element_count: 0,
         truncated: false,
+        deadline: Instant::now() + UIA_TRAVERSAL_BUDGET,
     };
 
     let root_name = get_name(&claude_root);
     let root_node = collect_node(&claude_root, &walker, 0, &mut state);
-    let mut warnings = Vec::new();
+    let mut warnings = vec![format!("Inspected {target_summary}.")];
     if state.truncated {
         warnings.push(format!(
-            "Snapshot stopped at {} elements or depth {} to keep diagnostics responsive.",
-            state.max_elements, state.max_depth
+            "Snapshot stopped at {} elements, depth {}, or the {} second traversal budget to keep diagnostics responsive.",
+            state.max_elements,
+            state.max_depth,
+            UIA_TRAVERSAL_BUDGET.as_secs()
         ));
+    }
+    if root_node.is_none() {
+        warnings.push(
+            "UI Automation returned a root handle, but no tree nodes could be read.".to_string(),
+        );
     }
 
     Ok(AccessibilitySnapshot {
@@ -95,6 +149,26 @@ pub fn inspect_first_claude_window(
         visible_text_blocks: vec![],
         warnings,
     })
+}
+
+fn target_window_summary(window: &DetectedWindow) -> String {
+    format!(
+        "window '{}' ({}, {}, {})",
+        if window.title.is_empty() {
+            "Untitled"
+        } else {
+            &window.title
+        },
+        window.hwnd.as_deref().unwrap_or("unknown HWND"),
+        window.class_name.as_deref().unwrap_or("unknown class"),
+        window
+            .bounds
+            .map(|bounds| format!(
+                "{}x{} at {},{}",
+                bounds.width, bounds.height, bounds.x, bounds.y
+            ))
+            .unwrap_or_else(|| "unknown bounds".to_string())
+    )
 }
 
 fn tree_walker(
@@ -112,7 +186,7 @@ fn empty_snapshot(options: InspectorOptions, warning: &str) -> AccessibilitySnap
     AccessibilitySnapshot {
         platform: "windows-uiautomation".to_string(),
         root_name: None,
-        max_depth: options.max_depth.unwrap_or(DEFAULT_MAX_DEPTH),
+        max_depth: options.max_depth.unwrap_or(DEFAULT_MAX_DEPTH).clamp(0, 30),
         max_elements: options.max_elements.unwrap_or(DEFAULT_MAX_ELEMENTS),
         element_count: 0,
         truncated: false,
@@ -143,17 +217,24 @@ fn detected_window_from_raw(window: RawWindow, processes: &[DetectedProcess]) ->
         .iter()
         .find(|process| Some(process.pid) == window.process_id);
     let mut signals = Vec::new();
-    if detection::is_likely_claude_window_title(&window.title) {
-        signals.push("window-title".to_string());
-    }
-    if process.is_some() {
-        signals.push("process-id".to_string());
-    }
-    if process
-        .map(|process| detection::is_likely_claude_process_name(&process.name))
-        .unwrap_or(false)
+
+    if is_usable_desktop_surface(&window)
+        && !detection::is_known_non_desktop_window(&window.title, &window.class_name)
     {
-        signals.push("process-name".to_string());
+        if detection::is_likely_claude_window_title(&window.title) {
+            signals.push("window-title".to_string());
+        }
+        if process.is_some() {
+            signals.push("process-id".to_string());
+        }
+        if process
+            .map(|process| {
+                detection::is_likely_claude_desktop_process(&process.name, process.path.as_deref())
+            })
+            .unwrap_or(false)
+        {
+            signals.push("process-name".to_string());
+        }
     }
 
     DetectedWindow {
@@ -166,6 +247,56 @@ fn detected_window_from_raw(window: RawWindow, processes: &[DetectedProcess]) ->
         bounds: window.bounds,
         detection_signals: signals,
     }
+}
+
+fn is_usable_desktop_surface(window: &RawWindow) -> bool {
+    window.visible
+        && window
+            .bounds
+            .map(|bounds| {
+                bounds.width >= MIN_TOP_LEVEL_WIDTH && bounds.height >= MIN_TOP_LEVEL_HEIGHT
+            })
+            .unwrap_or(false)
+}
+
+fn window_rank(window: &DetectedWindow) -> i32 {
+    let mut score = 0;
+    if window
+        .detection_signals
+        .iter()
+        .any(|signal| signal == "window-title")
+    {
+        score += 100;
+    }
+    if window
+        .detection_signals
+        .iter()
+        .any(|signal| signal == "process-name")
+    {
+        score += 40;
+    }
+    if window
+        .detection_signals
+        .iter()
+        .any(|signal| signal == "process-id")
+    {
+        score += 20;
+    }
+    if window
+        .class_name
+        .as_deref()
+        .map(|class_name| class_name.contains("Chrome_WidgetWin"))
+        .unwrap_or(false)
+    {
+        score += 15;
+    }
+    if window.visible {
+        score += 10;
+    }
+    if let Some(bounds) = window.bounds {
+        score += ((bounds.width * bounds.height) / 100_000).clamp(0, 20);
+    }
+    score
 }
 
 #[derive(Debug)]
@@ -253,6 +384,11 @@ fn collect_node(
     depth: usize,
     state: &mut TraversalState,
 ) -> Option<AccessibilityNode> {
+    if Instant::now() >= state.deadline {
+        state.truncated = true;
+        return None;
+    }
+
     if state.element_count >= state.max_elements {
         state.truncated = true;
         return None;
@@ -261,6 +397,26 @@ fn collect_node(
     let id = state.next_id;
     state.next_id += 1;
     state.element_count += 1;
+
+    let control_type = element
+        .get_control_type()
+        .ok()
+        .map(|control_type| format!("{control_type:?}"));
+    let localized_control_type = get_localized_control_type(element);
+    let name = get_name(element);
+    let automation_id = get_automation_id(element);
+    let class_name = get_classname(element);
+    let framework_id = get_framework_id(element);
+    let bounds = element.get_bounding_rectangle().ok().map(|rect| Bounds {
+        x: rect.get_left(),
+        y: rect.get_top(),
+        width: rect.get_width(),
+        height: rect.get_height(),
+    });
+    let enabled = element.is_enabled().ok();
+    let has_keyboard_focus = element.has_keyboard_focus().ok();
+    let offscreen = element.is_offscreen().ok();
+    let supported_patterns = supported_patterns(element);
 
     let mut children = Vec::new();
     if depth < state.max_depth {
@@ -283,29 +439,27 @@ fn collect_node(
     }
 
     let child_count = children.len();
+    let value = if depth > 0 && child_count == 0 {
+        get_value(element)
+    } else {
+        None
+    };
+
     Some(AccessibilityNode {
         id,
         depth,
-        control_type: element
-            .get_control_type()
-            .ok()
-            .map(|control_type| format!("{control_type:?}")),
-        localized_control_type: get_localized_control_type(element),
-        name: get_name(element),
-        automation_id: get_automation_id(element),
-        class_name: get_classname(element),
-        framework_id: get_framework_id(element),
-        value: get_value(element),
-        bounds: element.get_bounding_rectangle().ok().map(|rect| Bounds {
-            x: rect.get_left(),
-            y: rect.get_top(),
-            width: rect.get_width(),
-            height: rect.get_height(),
-        }),
-        enabled: element.is_enabled().ok(),
-        has_keyboard_focus: element.has_keyboard_focus().ok(),
-        offscreen: element.is_offscreen().ok(),
-        supported_patterns: supported_patterns(element),
+        control_type,
+        localized_control_type,
+        name,
+        automation_id,
+        class_name,
+        framework_id,
+        value,
+        bounds,
+        enabled,
+        has_keyboard_focus,
+        offscreen,
+        supported_patterns,
         child_count,
         children,
     })

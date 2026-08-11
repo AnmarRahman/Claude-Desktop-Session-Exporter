@@ -4,8 +4,9 @@ mod models;
 
 use capture::CaptureAdapter;
 use models::{
-    AccessibilitySnapshot, ClaudeDetection, DiagnosticSaveResult, InspectorOptions,
-    SessionMetadata, VisibleTextBlock,
+    AccessibilitySnapshot, ChatExportOptions, ChatExportResult, ClaudeDetection,
+    DiagnosticSaveResult, InspectorOptions, SessionMetadata, VisibleContentCapture,
+    VisibleTextBlock,
 };
 
 #[tauri::command]
@@ -62,6 +63,22 @@ fn save_diagnostic_snapshot(
 }
 
 #[tauri::command]
+fn capture_visible_content() -> Result<VisibleContentCapture, String> {
+    capture::platform_adapter()
+        .capture_visible_content()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn export_chat_transcript(options: Option<ChatExportOptions>) -> Result<ChatExportResult, String> {
+    capture::platform_adapter()
+        .export_chat_transcript(options.unwrap_or(ChatExportOptions {
+            source: Some("auto".to_string()),
+        }))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn sanitize_filename_part(value: String) -> String {
     filename::sanitize_filename_part(&value, "Claude Session")
 }
@@ -75,6 +92,8 @@ pub fn run() {
             get_accessibility_snapshot,
             extract_visible_text,
             save_diagnostic_snapshot,
+            capture_visible_content,
+            export_chat_transcript,
             sanitize_filename_part
         ])
         .run(tauri::generate_context!())

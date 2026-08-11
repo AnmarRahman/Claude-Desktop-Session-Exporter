@@ -3,6 +3,7 @@ export type SessionType = "chat" | "cowork" | "unknown";
 export interface DetectedProcess {
   pid: number;
   name: string;
+  path?: string;
 }
 
 export interface DetectedWindow {
@@ -103,4 +104,31 @@ export interface VisibleTextBlock {
 export interface DiagnosticSaveResult {
   path: string;
   warning: string;
+}
+
+export interface VisibleContentCapture {
+  image_path: string;
+  text?: string;
+  warnings: string[];
+}
+
+export interface ChatExportMessage {
+  role: string;
+  text: string;
+  timestamp?: string;
+}
+
+export interface ChatExportResult {
+  title: string;
+  session_id: string;
+  source_type: string;
+  source_path: string;
+  markdown_path: string;
+  json_path: string;
+  message_count: number;
+  warnings: string[];
+}
+
+export interface ChatExportOptions {
+  source?: "auto" | "home" | "code" | string;
 }

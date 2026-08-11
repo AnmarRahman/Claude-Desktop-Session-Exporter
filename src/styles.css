@@ -215,6 +215,25 @@ dd {
   margin-top: 24px;
 }
 
+.source-select {
+  display: grid;
+  gap: 4px;
+}
+
+.source-select span {
+  color: #6f6a60;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.source-select select {
+  border: 1px solid #d7d0c4;
+  border-radius: 8px;
+  min-height: 40px;
+  padding: 0 10px;
+}
+
 .actions.compact {
   margin-top: 0;
 }

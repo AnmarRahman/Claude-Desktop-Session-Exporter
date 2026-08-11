@@ -3,9 +3,10 @@ import {
   Activity,
   AlertCircle,
   Bug,
+  Camera,
   CheckCircle2,
   ChevronRight,
-  FileDown,
+  FileText,
   Loader2,
   RefreshCw,
   Save,
@@ -17,10 +18,13 @@ import { nodeMatchesSearch } from "./lib/inspector";
 import type {
   AccessibilityNode,
   AccessibilitySnapshot,
+  ChatExportOptions,
+  ChatExportResult,
   ClaudeDetection,
   DiagnosticSaveResult,
   InspectorOptions,
   SessionMetadata,
+  VisibleContentCapture,
 } from "./types";
 
 const captureOptions = [
@@ -52,15 +56,22 @@ function App() {
   const [selectedNode, setSelectedNode] = useState<AccessibilityNode | null>(null);
   const [expandedNodeIds, setExpandedNodeIds] = useState<Set<number>>(new Set());
   const [searchText, setSearchText] = useState("");
-  const [maxDepth, setMaxDepth] = useState(12);
-  const [maxElements, setMaxElements] = useState(5000);
+  const [maxDepth, setMaxDepth] = useState(0);
+  const [maxElements, setMaxElements] = useState(1500);
   const [treeView, setTreeView] = useState<"control" | "raw" | "content">("control");
+  const [exportSource, setExportSource] = useState<"auto" | "home" | "code">("auto");
   const [isChecking, setIsChecking] = useState(false);
   const [isInspecting, setIsInspecting] = useState(false);
+  const [isCapturingVisible, setIsCapturingVisible] = useState(false);
+  const [isExportingChat, setIsExportingChat] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [developerMode, setDeveloperMode] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [inspectorError, setInspectorError] = useState<string | null>(null);
+  const [inspectorMessage, setInspectorMessage] = useState<string | null>(null);
   const [saveResult, setSaveResult] = useState<DiagnosticSaveResult | null>(null);
+  const [visibleCapture, setVisibleCapture] = useState<VisibleContentCapture | null>(null);
+  const [chatExport, setChatExport] = useState<ChatExportResult | null>(null);
 
   const detectedTitle = useMemo(() => {
     if (session.title) return session.title;
@@ -95,6 +106,8 @@ function App() {
   async function loadAccessibilitySnapshot() {
     setIsInspecting(true);
     setError(null);
+    setInspectorError(null);
+    setInspectorMessage("Requesting a UI Automation snapshot from the detected Claude window...");
     setSaveResult(null);
     try {
       const nextSnapshot = await invoke<AccessibilitySnapshot>("get_accessibility_snapshot", {
@@ -103,8 +116,16 @@ function App() {
       setSnapshot(nextSnapshot);
       setSelectedNode(nextSnapshot.nodes[0] ?? null);
       setExpandedNodeIds(new Set(nextSnapshot.nodes[0] ? [nextSnapshot.nodes[0].id] : []));
+      setInspectorMessage(
+        nextSnapshot.nodes.length > 0
+          ? `Loaded ${nextSnapshot.element_count.toLocaleString()} UIA elements.`
+          : "Snapshot completed, but no UIA tree nodes were returned.",
+      );
     } catch (unknownError) {
-      setError(formatInvokeError(unknownError));
+      const message = formatInvokeError(unknownError);
+      setError(message);
+      setInspectorError(message);
+      setInspectorMessage(null);
     } finally {
       setIsInspecting(false);
     }
@@ -118,16 +139,67 @@ function App() {
 
     setIsSaving(true);
     setError(null);
+    setInspectorError(null);
     try {
-      setSaveResult(
-        await invoke<DiagnosticSaveResult>("save_diagnostic_snapshot", {
-          options: inspectorOptions,
-        }),
-      );
+      const result = await invoke<DiagnosticSaveResult>("save_diagnostic_snapshot", {
+        options: inspectorOptions,
+      });
+      setSaveResult(result);
+      setInspectorMessage(`Saved diagnostic snapshot to ${result.path}`);
     } catch (unknownError) {
-      setError(formatInvokeError(unknownError));
+      const message = formatInvokeError(unknownError);
+      setError(message);
+      setInspectorError(message);
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function captureVisibleContent() {
+    const confirmed = window.confirm(
+      "Visible content capture saves an image of the detected Claude window on this computer.",
+    );
+    if (!confirmed) return;
+
+    setIsCapturingVisible(true);
+    setError(null);
+    setInspectorError(null);
+    setInspectorMessage("Capturing the currently visible Claude window...");
+    try {
+      const result = await invoke<VisibleContentCapture>("capture_visible_content");
+      setVisibleCapture(result);
+      setInspectorMessage(`Captured visible Claude content to ${result.image_path}`);
+    } catch (unknownError) {
+      const message = formatInvokeError(unknownError);
+      setError(message);
+      setInspectorError(message);
+      setInspectorMessage(null);
+    } finally {
+      setIsCapturingVisible(false);
+    }
+  }
+
+  async function exportChatTranscript() {
+    const confirmed = window.confirm(
+      "Chat export saves the detected Claude session transcript as Markdown and JSON on this computer.",
+    );
+    if (!confirmed) return;
+
+    setIsExportingChat(true);
+    setError(null);
+    setInspectorError(null);
+    try {
+      const options: ChatExportOptions = { source: exportSource };
+      const result = await invoke<ChatExportResult>("export_chat_transcript", { options });
+      setChatExport(result);
+      setInspectorMessage(`Exported ${result.message_count.toLocaleString()} chat messages to ${result.markdown_path}`);
+    } catch (unknownError) {
+      const message = formatInvokeError(unknownError);
+      setError(message);
+      setInspectorError(message);
+      setInspectorMessage(null);
+    } finally {
+      setIsExportingChat(false);
     }
   }
 
@@ -227,9 +299,35 @@ function App() {
           </div>
 
           <div className="actions">
-            <button className="primary" type="button" disabled>
-              <FileDown size={18} aria-hidden="true" />
-              <span>Capture Current Session</span>
+            <label className="source-select">
+              <span>Source</span>
+              <select value={exportSource} onChange={(event) => setExportSource(event.target.value as "auto" | "home" | "code")}>
+                <option value="auto">Auto</option>
+                <option value="home">Home / Cowork</option>
+                <option value="code">Claude Code</option>
+              </select>
+            </label>
+            <button
+              className="primary"
+              type="button"
+              disabled={!detection.detected || isExportingChat}
+              title="Exports the detected Claude transcript to local Markdown and JSON files."
+              aria-label="Export Claude chat transcript"
+              onClick={exportChatTranscript}
+            >
+              {isExportingChat ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <FileText size={18} aria-hidden="true" />}
+              <span>Export Chat Transcript</span>
+            </button>
+            <button
+              className="secondary"
+              type="button"
+              disabled={!detection.detected || isCapturingVisible}
+              title="Captures the currently visible Claude window to a local image. Scrolling and PDF export are not implemented yet."
+              aria-label="Capture visible Claude content"
+              onClick={captureVisibleContent}
+            >
+              {isCapturingVisible ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Camera size={18} aria-hidden="true" />}
+              <span>Capture Visible</span>
             </button>
             <button className="secondary" type="button" onClick={refreshClaudeStatus} disabled={isChecking}>
               {isChecking ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <RefreshCw size={18} aria-hidden="true" />}
@@ -271,7 +369,7 @@ function App() {
             </label>
             <label>
               <span>Max depth</span>
-              <input type="number" min={1} max={30} value={maxDepth} onChange={(event) => setMaxDepth(Number(event.target.value))} />
+              <input type="number" min={0} max={30} value={maxDepth} onChange={(event) => setMaxDepth(Number(event.target.value))} />
             </label>
             <label>
               <span>Max elements</span>
@@ -288,6 +386,32 @@ function App() {
           </div>
 
           {saveResult && <p className="notice">{saveResult.warning} Saved to {saveResult.path}</p>}
+          {visibleCapture && (
+            <div className="notice">
+              <p>Captured visible Claude content to {visibleCapture.image_path}</p>
+              {visibleCapture.warnings.map((warning) => (
+                <p key={warning}>{warning}</p>
+              ))}
+            </div>
+          )}
+          {chatExport && (
+            <div className="notice">
+              <p>Exported {chatExport.message_count.toLocaleString()} chat messages from {chatExport.title}.</p>
+              <p>Source: {chatExport.source_type}</p>
+              <p>Markdown: {chatExport.markdown_path}</p>
+              <p>JSON: {chatExport.json_path}</p>
+              {chatExport.warnings.map((warning) => (
+                <p key={warning}>{warning}</p>
+              ))}
+            </div>
+          )}
+          {inspectorError && (
+            <div className="error diagnostic-status">
+              <AlertCircle size={18} aria-hidden="true" />
+              <span>{inspectorError}</span>
+            </div>
+          )}
+          {inspectorMessage && !inspectorError && <p className="notice diagnostic-status">{inspectorMessage}</p>}
 
           <div className="diagnostic-content">
             <div className="diagnostic-card">
@@ -314,7 +438,9 @@ function App() {
                 <Bug size={18} aria-hidden="true" />
                 <h3>UI Automation Tree</h3>
               </div>
-              {snapshot ? (
+              {isInspecting ? (
+                <p className="muted">Reading UI Automation tree from the detected Claude window...</p>
+              ) : snapshot ? (
                 <>
                   <p className="muted">
                     {snapshot.element_count.toLocaleString()} elements discovered
@@ -364,6 +490,34 @@ function App() {
                 </ul>
               ) : (
                 <p className="muted">No likely conversation containers have been identified yet.</p>
+              )}
+            </div>
+
+            <div className="diagnostic-card text-card">
+              <h3>Chat Transcript Export</h3>
+              {chatExport ? (
+                <div className="capture-result">
+                  <p><strong>Title:</strong> {chatExport.title}</p>
+                  <p><strong>Source Type:</strong> {chatExport.source_type}</p>
+                  <p><strong>Messages:</strong> {chatExport.message_count.toLocaleString()}</p>
+                  <p><strong>Markdown:</strong> {chatExport.markdown_path}</p>
+                  <p><strong>JSON:</strong> {chatExport.json_path}</p>
+                  <p><strong>Source:</strong> {chatExport.source_path}</p>
+                </div>
+              ) : (
+                <p className="muted">Use Export Chat Transcript to save the selected Claude source.</p>
+              )}
+            </div>
+
+            <div className="diagnostic-card text-card">
+              <h3>Visible Content Capture</h3>
+              {visibleCapture ? (
+                <div className="capture-result">
+                  <p><strong>Image:</strong> {visibleCapture.image_path}</p>
+                  {visibleCapture.text ? <p>{visibleCapture.text}</p> : <p className="muted">No OCR text was extracted yet.</p>}
+                </div>
+              ) : (
+                <p className="muted">Use Capture Visible Content to save the currently visible Claude window.</p>
               )}
             </div>
 

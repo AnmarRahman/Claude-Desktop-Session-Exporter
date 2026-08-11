@@ -1,7 +1,8 @@
 use crate::capture::{CaptureAdapter, CaptureError};
 use crate::models::{
-    AccessibilitySnapshot, ClaudeDetection, DiagnosticSaveResult, InspectorOptions,
-    SessionMetadata, VisibleTextBlock,
+    AccessibilitySnapshot, ChatExportOptions, ChatExportResult, ClaudeDetection,
+    DiagnosticSaveResult, InspectorOptions, SessionMetadata, VisibleContentCapture,
+    VisibleTextBlock,
 };
 
 pub struct UnsupportedCaptureAdapter;
@@ -55,6 +56,21 @@ impl CaptureAdapter for UnsupportedCaptureAdapter {
     ) -> Result<DiagnosticSaveResult, CaptureError> {
         Err(CaptureError::Diagnostic(
             "This platform is not supported by Claude Session Exporter.".to_string(),
+        ))
+    }
+
+    fn capture_visible_content(&self) -> Result<VisibleContentCapture, CaptureError> {
+        Err(CaptureError::Native(
+            "Visible content capture is not supported on this platform.".to_string(),
+        ))
+    }
+
+    fn export_chat_transcript(
+        &self,
+        _options: ChatExportOptions,
+    ) -> Result<ChatExportResult, CaptureError> {
+        Err(CaptureError::Native(
+            "Claude transcript export is not supported on this platform.".to_string(),
         ))
     }
 }

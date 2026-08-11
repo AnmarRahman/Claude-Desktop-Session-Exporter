@@ -1,6 +1,7 @@
 use crate::models::{
-    AccessibilitySnapshot, ClaudeDetection, DiagnosticSaveResult, InspectorOptions,
-    SessionMetadata, VisibleTextBlock,
+    AccessibilitySnapshot, ChatExportOptions, ChatExportResult, ClaudeDetection,
+    DiagnosticSaveResult, InspectorOptions, SessionMetadata, VisibleContentCapture,
+    VisibleTextBlock,
 };
 use thiserror::Error;
 
@@ -27,6 +28,11 @@ pub trait CaptureAdapter {
         &self,
         options: InspectorOptions,
     ) -> Result<DiagnosticSaveResult, CaptureError>;
+    fn capture_visible_content(&self) -> Result<VisibleContentCapture, CaptureError>;
+    fn export_chat_transcript(
+        &self,
+        options: ChatExportOptions,
+    ) -> Result<ChatExportResult, CaptureError>;
 }
 
 #[derive(Debug, Error)]
