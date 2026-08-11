@@ -112,10 +112,29 @@ export interface VisibleContentCapture {
   warnings: string[];
 }
 
+export interface ChatExportReference {
+  kind: string;
+  label?: string;
+  url?: string;
+}
+
+export interface ChatExportBlock {
+  kind: "text" | "thinking" | "tool_use" | "tool_result" | "attachment" | "file" | string;
+  text?: string;
+  tool_name?: string;
+  tool_input?: string;
+  is_error?: boolean;
+  references: ChatExportReference[];
+  /** Verbatim payload of a block this build does not understand. */
+  raw?: string;
+}
+
 export interface ChatExportMessage {
   role: string;
+  /** The message's prose, excluding thinking and tool activity. */
   text: string;
   timestamp?: string;
+  blocks: ChatExportBlock[];
 }
 
 export interface ChatExportResult {
@@ -130,5 +149,11 @@ export interface ChatExportResult {
 }
 
 export interface ChatExportOptions {
-  source?: "auto" | "home" | "code" | string;
+  source?: "auto" | "home" | "cowork" | "code" | string;
+  /** Export this Home/Cowork conversation instead of the most recent one. */
+  conversation_id?: string;
+  /** Include Claude's thinking blocks. Off unless requested. */
+  include_thinking?: boolean;
+  /** Include tool and Cowork activity. On unless disabled. */
+  include_tools?: boolean;
 }

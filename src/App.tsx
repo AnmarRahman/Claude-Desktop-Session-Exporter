@@ -49,6 +49,13 @@ const emptySession: SessionMetadata = {
   session_type: "unknown",
 };
 
+const SOURCE_LABELS: Record<"auto" | "home" | "cowork" | "code", string> = {
+  auto: "the auto-detected source",
+  home: "the Home chat",
+  cowork: "the most recent Cowork session",
+  code: "the most recent Claude Code session",
+};
+
 function App() {
   const [detection, setDetection] = useState<ClaudeDetection>(emptyDetection);
   const [session, setSession] = useState<SessionMetadata>(emptySession);
@@ -59,7 +66,7 @@ function App() {
   const [maxDepth, setMaxDepth] = useState(0);
   const [maxElements, setMaxElements] = useState(1500);
   const [treeView, setTreeView] = useState<"control" | "raw" | "content">("control");
-  const [exportSource, setExportSource] = useState<"auto" | "home" | "code">("auto");
+  const [exportSource, setExportSource] = useState<"auto" | "home" | "cowork" | "code">("auto");
   const [isChecking, setIsChecking] = useState(false);
   const [isInspecting, setIsInspecting] = useState(false);
   const [isCapturingVisible, setIsCapturingVisible] = useState(false);
@@ -72,6 +79,11 @@ function App() {
   const [saveResult, setSaveResult] = useState<DiagnosticSaveResult | null>(null);
   const [visibleCapture, setVisibleCapture] = useState<VisibleContentCapture | null>(null);
   const [chatExport, setChatExport] = useState<ChatExportResult | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    message: string;
+    confirmLabel: string;
+    run: () => Promise<void>;
+  } | null>(null);
 
   const detectedTitle = useMemo(() => {
     if (session.title) return session.title;
@@ -83,6 +95,20 @@ function App() {
     () => ({ max_depth: maxDepth, max_elements: maxElements, tree_view: treeView }),
     [maxDepth, maxElements, treeView],
   );
+
+  // `window.confirm` is unusable here: wry's WKUIDelegate does not implement
+  // WKWebView's JavaScript confirm panel, so the call returns false immediately
+  // without showing anything and the action silently never runs.
+  function requestConfirm(message: string, confirmLabel: string, run: () => Promise<void>) {
+    setError(null);
+    setPendingConfirm({ message, confirmLabel, run });
+  }
+
+  async function acceptPendingConfirm() {
+    const pending = pendingConfirm;
+    setPendingConfirm(null);
+    if (pending) await pending.run();
+  }
 
   async function refreshClaudeStatus() {
     setIsChecking(true);
@@ -131,12 +157,15 @@ function App() {
     }
   }
 
-  async function saveDiagnosticSnapshot() {
-    const confirmed = window.confirm(
-      "Diagnostic snapshots can contain text from your Claude conversation.\nThey remain on this computer.",
+  function saveDiagnosticSnapshot() {
+    requestConfirm(
+      "Diagnostic snapshots can contain text from your Claude conversation. They remain on this computer.",
+      "Save Snapshot",
+      runSaveDiagnosticSnapshot,
     );
-    if (!confirmed) return;
+  }
 
+  async function runSaveDiagnosticSnapshot() {
     setIsSaving(true);
     setError(null);
     setInspectorError(null);
@@ -155,12 +184,15 @@ function App() {
     }
   }
 
-  async function captureVisibleContent() {
-    const confirmed = window.confirm(
+  function captureVisibleContent() {
+    requestConfirm(
       "Visible content capture saves an image of the detected Claude window on this computer.",
+      "Capture Visible",
+      runCaptureVisibleContent,
     );
-    if (!confirmed) return;
+  }
 
+  async function runCaptureVisibleContent() {
     setIsCapturingVisible(true);
     setError(null);
     setInspectorError(null);
@@ -179,12 +211,21 @@ function App() {
     }
   }
 
-  async function exportChatTranscript() {
-    const confirmed = window.confirm(
-      "Chat export saves the detected Claude session transcript as Markdown and JSON on this computer.",
+  function exportChatTranscript() {
+    // Naming the resolved conversation here is the only check the user gets that
+    // Auto picked the right session: Claude's shell-mode keys are often missing,
+    // so Auto can resolve to a stale Home/Cowork chat while Claude Code is open.
+    const target = session.title
+      ? `"${session.title}"`
+      : "the most recently opened conversation";
+    requestConfirm(
+      `Export ${SOURCE_LABELS[exportSource]} — ${target} — as Markdown and JSON on this computer. Confirm this is the session you expect before continuing.`,
+      "Export Transcript",
+      runExportChatTranscript,
     );
-    if (!confirmed) return;
+  }
 
+  async function runExportChatTranscript() {
     setIsExportingChat(true);
     setError(null);
     setInspectorError(null);
@@ -301,16 +342,21 @@ function App() {
           <div className="actions">
             <label className="source-select">
               <span>Source</span>
-              <select value={exportSource} onChange={(event) => setExportSource(event.target.value as "auto" | "home" | "code")}>
+              <select
+                value={exportSource}
+                disabled={pendingConfirm !== null}
+                onChange={(event) => setExportSource(event.target.value as "auto" | "home" | "cowork" | "code")}
+              >
                 <option value="auto">Auto</option>
-                <option value="home">Home / Cowork</option>
+                <option value="home">Home chat</option>
+                <option value="cowork">Cowork session</option>
                 <option value="code">Claude Code</option>
               </select>
             </label>
             <button
               className="primary"
               type="button"
-              disabled={!detection.detected || isExportingChat}
+              disabled={!detection.detected || isExportingChat || pendingConfirm !== null}
               title="Exports the detected Claude transcript to local Markdown and JSON files."
               aria-label="Export Claude chat transcript"
               onClick={exportChatTranscript}
@@ -321,7 +367,7 @@ function App() {
             <button
               className="secondary"
               type="button"
-              disabled={!detection.detected || isCapturingVisible}
+              disabled={!detection.detected || isCapturingVisible || pendingConfirm !== null}
               title="Captures the currently visible Claude window to a local image. Scrolling and PDF export are not implemented yet."
               aria-label="Capture visible Claude content"
               onClick={captureVisibleContent}
@@ -334,6 +380,20 @@ function App() {
               <span>Retry</span>
             </button>
           </div>
+
+          {pendingConfirm && (
+            <div className="confirm-bar" role="alertdialog" aria-label="Confirm action">
+              <p>{pendingConfirm.message}</p>
+              <div className="actions compact">
+                <button className="primary" type="button" onClick={acceptPendingConfirm}>
+                  <span>{pendingConfirm.confirmLabel}</span>
+                </button>
+                <button className="secondary" type="button" onClick={() => setPendingConfirm(null)}>
+                  <span>Cancel</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <aside className="summary-panel" aria-label="Phase summary">
@@ -355,7 +415,12 @@ function App() {
                 {isInspecting ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Search size={18} aria-hidden="true" />}
                 <span>Refresh Tree</span>
               </button>
-              <button className="secondary" type="button" onClick={saveDiagnosticSnapshot} disabled={isSaving}>
+              <button
+                className="secondary"
+                type="button"
+                onClick={saveDiagnosticSnapshot}
+                disabled={isSaving || pendingConfirm !== null}
+              >
                 {isSaving ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Save size={18} aria-hidden="true" />}
                 <span>Save Snapshot</span>
               </button>

@@ -72,9 +72,7 @@ fn capture_visible_content() -> Result<VisibleContentCapture, String> {
 #[tauri::command]
 fn export_chat_transcript(options: Option<ChatExportOptions>) -> Result<ChatExportResult, String> {
     capture::platform_adapter()
-        .export_chat_transcript(options.unwrap_or(ChatExportOptions {
-            source: Some("auto".to_string()),
-        }))
+        .export_chat_transcript(options.unwrap_or_default())
         .map_err(|error| error.to_string())
 }
 

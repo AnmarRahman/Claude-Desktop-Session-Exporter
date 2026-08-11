@@ -6,6 +6,11 @@ use crate::models::{
 use thiserror::Error;
 
 pub mod claude;
+/// Reads Claude Code and Cowork sessions from local JSONL transcripts.
+pub mod transcript;
+/// Reads Claude Home/Cowork conversations from the local Chromium profile.
+/// Platform-neutral: the cache format is the same everywhere.
+pub mod web_cache;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(any(windows, target_os = "macos")))]

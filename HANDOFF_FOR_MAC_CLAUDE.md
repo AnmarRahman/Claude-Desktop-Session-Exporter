@@ -66,272 +66,92 @@ Latest known verification before this handoff:
 
 ## Current State Summary
 
-The app can now detect Claude Desktop and export Claude Code transcripts from local Claude data. This is working.
+The Home/Cowork blocker described in the original handoff is **resolved**. The
+transcripts were never in Local Storage or IndexedDB — they are in Claude
+Desktop's Chromium **HTTP disk cache**, as the JSON response to
+`chat_conversations/<uuid>?tree=True&rendering_mode=messages`. See
+[docs/WEB_CACHE.md](docs/WEB_CACHE.md).
 
-The current blocker is regular Claude Home / Cowork chat export. The app can sometimes correctly detect that Claude Desktop is in Home/Chat mode, but exporting the transcript fails with this message:
+Verified on macOS, 2026-08-11: 10,690 cache entries indexed, 43 conversations
+recovered, one 242-message conversation exported end to end with tool activity
+and thinking intact.
 
-```text
-Diagnostic snapshot failed. No regular Claude Home / Cowork chat transcript was found in the local cache. Open the chat in Claude Desktop, wait for it to load, and then retry.
-```
-
-This means the app knows Claude is in a regular Home/Cowork chat context, but the current cache reader cannot find the actual chat transcript in the local Claude Desktop cache.
+Both platforms now share one reader, `src-tauri/src/capture/web_cache/`. It
+implements Chromium's simple-cache format, verified against a real macOS profile.
+Chromium's other HTTP backend (blockfile) is **not** implemented; whether Windows
+Claude uses it has not been checked, so the reader detects the backend and says
+so rather than reporting an empty cache. The old string-scanning
+`capture/windows/web_cache.rs` was removed.
 
 ## What Works
 
-### Claude Code transcript export
+### Home/Cowork transcript export (verified on macOS)
 
-Implemented in:
+`src-tauri/src/capture/web_cache/` — indexes the HTTP cache by entry key,
+deduplicates by conversation UUID keeping the newest, decodes the zstd/gzip/br
+body, normalizes `chat_messages` into ordered blocks, and writes Markdown + JSON
+to `src-tauri/exports/`.
 
-```text
-src-tauri/src/capture/windows/transcript.rs
-```
+Export options: `source`, `conversation_id`, `include_thinking` (default off),
+`include_tools` (default on).
 
-It reads Claude Desktop code-session metadata from locations like:
+### Cowork and Claude Code export (all platforms)
 
-```text
-%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude-code-sessions
-%APPDATA%\Claude\claude-code-sessions
-```
+`src-tauri/src/capture/transcript.rs`, promoted out of `windows/` and made
+platform-neutral. It reads two stores of the same JSONL format:
+`local-agent-mode-sessions` (Cowork — the sessions in Claude Desktop's Home
+sidebar) and `claude-code-sessions` (Claude Code). A Cowork session keeps its
+transcript in its own `.claude` home:
+`local_<id>/.claude/projects/<sanitized-cwd>/<cliSessionId>.jsonl`.
 
-Then it maps `cliSessionId` and cwd to:
+Verified on macOS by exporting a 211-message Cowork session.
 
-```text
-%USERPROFILE%\.claude\projects\<sanitized-cwd>\<cliSessionId>.jsonl
-```
+### Claude detection
 
-It parses the JSONL transcript and exports Markdown and JSON into:
-
-```text
-src-tauri/exports/
-```
-
-The parser intentionally keeps user prompts and assistant text while filtering noisy tool-result data.
-
-### Claude window detection
-
-Relevant files:
-
-```text
-src-tauri/src/capture/claude/detection.rs
-src-tauri/src/capture/windows/process.rs
-src-tauri/src/capture/windows/uia.rs
-src-tauri/src/capture/windows/mod.rs
-```
-
-The Windows detector now avoids many false positives, including:
-
-- the exporter app itself
-- dev/editor windows
-- Claude Code helper process paths
-- stale Claude Code fallback when the current Claude shell mode says Home/Chat
+Windows: `capture/claude/detection.rs`, `capture/windows/{process,uia}.rs`,
+unchanged. macOS: a process scan for the `/Claude.app/Contents/MacOS/` bundle
+executable. The export button is gated on detection, so without this the macOS
+export was unreachable from the UI.
 
 ### Source selector
 
-The UI now has a source selector:
+Unchanged behavior, now backed by the shared reader. `auto` still refuses to fall
+back to a stale Claude Code session while Claude Desktop reports Home/Chat mode,
+using `lastKnownMode` from the `dframe-store` Local Storage blob — which the
+shared module reads on macOS too.
 
-```text
-Auto
-Home / Cowork
-Claude Code
-```
+## Known Limits
 
-Relevant files:
+The HTTP cache is best-effort. A conversation never opened on this machine is not
+cached, Chromium evicts entries under pressure, and a cached copy is only as
+fresh as the last time the conversation was opened. If that proves too lossy, the
+fallback is an authenticated refetch using the local session cookie, which would
+require Keychain-decrypting `Cookies`. Not attempted.
 
-```text
-src/App.tsx
-src/types.ts
-src/styles.css
-src-tauri/src/models.rs
-src-tauri/src/capture/windows/mod.rs
-```
+## Next Steps
 
-Important intended behavior:
-
-- `Claude Code` should export only Claude Code transcripts.
-- `Home / Cowork` should export only regular Claude Home/Cowork chats.
-- `Auto` should not silently export a stale Claude Code session when Claude Desktop is currently in Home/Chat mode.
-
-### Visible screenshot capture
-
-Implemented in:
-
-```text
-src-tauri/src/capture/windows/visual.rs
-```
-
-It uses Win32 GDI capture and saves a BMP diagnostic image into:
-
-```text
-src-tauri/diagnostics/
-```
-
-This proved useful as a fallback diagnostic path, but it is not a full transcript export solution.
-
-### UIA inspector
-
-Relevant files:
-
-```text
-src-tauri/src/capture/windows/uia.rs
-src/App.tsx
-```
-
-The UI Automation inspector was hardened so it does not freeze the app as badly:
-
-- snapshot work moved off the UI thread
-- timeout handling added
-- `maxDepth=0` supported
-- clearer warning messages
-
-However, Claude Desktop on Windows often does not expose a readable UIA tree for the Chromium content root. This is an important Phase 2 finding, not just a UI bug.
-
-## Current Blocker In Detail
-
-The user opened a regular Claude Home chat, for example:
-
-- `Multi-agent project proposal analyzer`
-- possibly `SQL database check`
-
-Before recent fixes, the app incorrectly showed a stale Claude Code title:
-
-```text
-Next.js npm installation errors
-```
-
-That stale fallback problem was addressed. The app now checks Claude Desktop shell mode from local storage. In the observed Windows data, the app found values like:
-
-```text
-LSS-sidebar-selected-mode = task
-dframe-store.state.lastKnownMode = "chat"
-```
-
-Those values were found in Claude Desktop Chromium local storage, including a file similar to:
-
-```text
-Local Storage\leveldb\012924.log
-```
-
-After that fix, the app correctly refuses to fall back to Claude Code while Claude is in Home/Chat. But it still cannot find the actual Home/Cowork transcript.
-
-The current regular-chat cache reader is here:
-
-```text
-src-tauri/src/capture/windows/web_cache.rs
-```
-
-It scans Claude Desktop Chromium storage files for UTF-8 and UTF-16LE JSON fragments containing things like:
-
-```text
-chat_messages
-chat_conversation
-react-query-cache-ls
-dframe-store
-```
-
-Earlier in development, a local storage log file did contain a full regular conversation record:
-
-```text
-Local Storage\leveldb\012915.log
-```
-
-That record included:
-
-```text
-name: Multi-agent project proposal analyzer
-uuid: 7289b876-bc06-4859-8c15-be33a89db50b
-chat_messages: [...]
-```
-
-Later, Claude Desktop compacted or rotated the LevelDB files, and the current files no longer contained that transcript. Current local storage and session storage scans found shell mode metadata but not `chat_messages` or the visible chat title.
-
-This suggests regular Home/Cowork messages may currently be one of:
-
-- only in memory
-- in IndexedDB rather than Local Storage
-- in another Claude Desktop cache location
-- behind an authenticated Claude API response
-- serialized or encoded in a way the naive scanner does not parse
-- available through DOM/DevTools rather than local cache
-
-## Best Next Investigation Paths
-
-### 1. Investigate macOS Claude Desktop storage
-
-Find the actual Claude Desktop data directory on macOS. Likely candidates:
-
-```text
-~/Library/Application Support/Claude/
-~/Library/Containers/*Claude*/Data/Library/Application Support/
-```
-
-Search for:
-
-```text
-Local Storage/leveldb
-Session Storage
-IndexedDB
-claude-code-sessions
-```
-
-Copy the storage folders before inspecting them, because Claude may lock, compact, or rotate the files while running.
-
-### 2. Parse IndexedDB properly
-
-Do not rely only on raw string scanning of LevelDB logs. Investigate IndexedDB contents for regular Home/Cowork conversations.
-
-Search copied cache data for:
-
-```text
-chat_messages
-chat_conversation
-conversation
-artifact
-dframe-store
-react-query-cache-ls
-organization_uuid
-current_conversation
-```
-
-Also search by the visible conversation title.
-
-### 3. Investigate authenticated Claude API/cache data
-
-If the current conversation UUID can be found from route state or cache, look for a Claude endpoint that returns full conversation JSON.
-
-The app should only use the user's local Claude Desktop authenticated state and should avoid uploading any conversation data anywhere.
-
-The likely path is:
-
-1. get current organization/account context from Claude Desktop cache
-2. get current conversation id from route/cache
-3. fetch or reconstruct the conversation detail
-4. export locally
-
-### 4. Investigate DOM or DevTools access
-
-Check whether Claude Desktop can be launched with a remote debugging port or otherwise exposes WebView/Chromium DevTools access.
-
-If available, DOM extraction may be more reliable than UIA on Windows. On macOS, accessibility APIs may work better if Claude Desktop is granted Accessibility permissions.
-
-### 5. OCR fallback only if needed
-
-OCR may be needed if no cache/API/DOM path is available, but it has limitations:
-
-- visible content only
-- needs controlled scrolling to capture a full transcript
-- message role separation can be fragile
-- the user previously said not to implement Phase 3 scrolling/PDF unless explicitly approved
-
-OCR should be treated as a fallback, not the primary export method, unless the user explicitly approves that direction.
+1. **Conversation picker UI.** Now the top priority: Cowork sessions and Home
+   chats live in separate stores whose timestamps update on different triggers,
+   so nothing on disk reliably says which session is on screen. Letting the user
+   pick removes the guesswork entirely.
+1. **(was) Conversation picker UI.** The backend already lists every cached
+   conversation with real titles and accepts `conversation_id`; the frontend
+   still only exports the most recent one.
+2. **Port Claude Code export to macOS** — the data is at `~/.claude/projects` and
+   `~/Library/Application Support/Claude/claude-code-sessions`.
+3. **HTML and PDF rendering** from the normalized model.
+4. **Reconsider gating export on detection** — export reads the cache and works
+   whether or not Claude Desktop is running.
 
 ## Files To Read First
 
 Start with these:
 
 ```text
-src-tauri/src/capture/windows/web_cache.rs
+docs/WEB_CACHE.md
+src-tauri/src/capture/web_cache/mod.rs
+src-tauri/src/capture/web_cache/conversation.rs
 src-tauri/src/capture/windows/transcript.rs
-src-tauri/src/capture/windows/mod.rs
 src-tauri/src/models.rs
 src/App.tsx
 src/types.ts
@@ -346,7 +166,7 @@ src-tauri/src/capture/windows/uia.rs
 src-tauri/src/capture/windows/visual.rs
 ```
 
-macOS scaffold:
+macOS adapter:
 
 ```text
 src-tauri/src/capture/macos.rs
@@ -358,7 +178,15 @@ Do not let the app export a Claude Code transcript when the user has a regular C
 
 If the Home/Cowork transcript cannot be found, show a clear failure and explain which source paths were checked. Do not silently fall back to Claude Code.
 
-## User's Latest Request
+## Verification Status
 
-The user does not want behavior changes right now. They only asked for this handoff file so Claude on a Mac can continue from the latest blocker tomorrow.
+- `cargo test` — 41 pass, plus the ignored real-profile test which passes on demand.
+- `cargo check --target x86_64-pc-windows-msvc` — the Windows-only modules
+  type-check. The full Windows build could not be run here: `tauri-winres` needs
+  `llvm-rc`, which is not installed on this Mac.
+- The Windows Chromium cache backend is unconfirmed. If Claude Desktop on Windows
+  uses the blockfile backend, Home/Cowork export will fail there with a message
+  naming the backend, and a blockfile reader would be needed.
+- `npm test` — 5 pass. `npm run build` — clean.
+- The Windows *runtime* path has not been exercised since the refactor.
 

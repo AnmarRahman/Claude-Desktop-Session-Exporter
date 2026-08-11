@@ -43,12 +43,18 @@ The app should keep Claude-specific assumptions in one native capture area:
 ```text
 src-tauri/src/capture/
     mod.rs
-    windows.rs
     macos.rs
     unsupported.rs
-    claude/
-        mod.rs
-        signals.rs
+    claude/            detection + accessibility-tree analysis
+    windows/           UIA, process scan, visual capture, Claude Code transcripts
+    web_cache/         Home/Cowork transcripts (platform-neutral)
+        mod.rs             index, select, export
+        paths.rs           per-platform Chromium profile roots
+        simple_cache.rs    Chromium cache entry format
+        decode.rs          zstd / gzip / deflate / br
+        conversation.rs    payload schema -> normalized model
+        export.rs          Markdown + JSON writers
+        shell_mode.rs      Home vs Code, from Local Storage
 ```
 
 The TypeScript frontend should talk to Rust through Tauri commands only. The frontend should not know whether the active adapter is Windows UI Automation or macOS AXUIElement.
@@ -69,37 +75,60 @@ Phase 1 explicitly does not claim conversation extraction, scrolling, deduplicat
 
 ## Phase Roadmap
 
-### Phase 1 - Shell, Detection, Inspector
+> **Revised 2026-08-11.** Phases 2-5 were written on the assumption that
+> transcripts had to be scraped from the accessibility tree. They do not:
+> Claude Desktop's Chromium HTTP cache holds the complete conversation JSON
+> (see [docs/WEB_CACHE.md](docs/WEB_CACHE.md)). Scroll-driven scanning,
+> fingerprinting, and deduplication are no longer on the critical path.
 
-Build the app shell and native adapter boundary. Detect whether Claude Desktop appears to be running and expose enough diagnostic information to validate native access assumptions. Use guarded, shallow snapshots to avoid expensive full-tree walks.
+### Phase 1 - Shell, Detection, Inspector (done on Windows)
 
-### Phase 2 - Visible Text Extraction
+Build the app shell and native adapter boundary. Detect whether Claude Desktop
+appears to be running and expose enough diagnostic information to validate native
+access assumptions. macOS detection is still outstanding.
 
-Extract visible text from one normal Claude chat using native accessibility data. Normalize user and assistant message candidates into a platform-independent model and log blocks for inspection.
+### Phase 2 - Local Transcript Readers (done)
 
-### Phase 3 - Scrolling and Deduplication
+Read conversations from Claude Desktop's own local data. Claude Code sessions
+from JSONL transcripts; Home/Cowork conversations from the Chromium HTTP cache.
+Normalize both into one platform-independent model of ordered blocks: text,
+thinking, tool use, tool results, attachments, files. Export Markdown and JSON.
 
-Find the conversation scroll container, scan upward to the beginning, scan downward to the end, wait for lazy content, fingerprint blocks, and deduplicate stable content.
+### Phase 3 - Conversation Selection
 
-### Phase 4 - Structured Content
+Surface every cached conversation with its real title and date, and let the user
+pick one instead of always taking the most recently opened. The reader already
+supports this; the UI does not.
 
-Detect headings, paragraphs, lists, links, code blocks, and tables. Preserve table rows/columns structurally whenever the accessibility tree supports it.
+### Phase 4 - Platform Parity
 
-### Phase 5 - Images and Visual Fallback
+macOS Claude detection via a running-application scan. Port the Claude Code
+reader off Windows-only paths. Exercise the Windows runtime path after the shared
+reader refactor.
 
-Capture image elements and visual bounding regions for content that cannot be semantically reconstructed. Track source type, size, chronology, and duplicate image fingerprints.
+### Phase 5 - HTML and PDF
 
-### Phase 6 - HTML and PDF
+Render normalized sessions to searchable HTML and generate PDF with print CSS,
+page numbers, page-break handling, repeatable table headers, code formatting, and
+filename sanitization.
 
-Render normalized sessions to searchable HTML and generate PDF with print CSS, page numbers, page-break handling, repeatable table headers, code formatting, and filename sanitization.
+### Phase 6 - Images and Visual Fallback
 
-### Phase 7 - Cowork Extraction
+Capture images and bounding regions for content that cannot be reconstructed
+from the payload. Track source type, size, chronology, and duplicate
+fingerprints. This is also where UIA/AX scraping would return if a cache-less
+fallback ever becomes necessary.
 
-Add Cowork-specific classifiers for tool activity, file cards, task progress, generated previews, and other timeline cards.
+### Phase 7 - Cowork Classification
+
+The payload already carries tool activity structurally. This phase is about
+presenting it well: classifying known activity, file, and status cards rather
+than rendering every `tool_use` identically.
 
 ### Phase 8 - Product Hardening
 
-Add preview, settings, developer mode, warnings, partial export reporting, diagnostics export, packaging, and cross-platform release validation.
+Add preview, settings, developer mode, warnings, partial export reporting,
+diagnostics export, packaging, and cross-platform release validation.
 
 ## Normalized Model Direction
 
@@ -122,17 +151,13 @@ Extraction and rendering must remain separate. A failed semantic parse should pr
 
 ## Technical Risks
 
+### Cache Coverage
+
+The HTTP cache is best-effort. A conversation never opened on this machine is not cached, Chromium evicts entries under pressure, and a cached copy is only as fresh as the last time the conversation was opened. Mitigation: report the source path and cache date on every export, and never present a partial export as complete. If coverage proves insufficient, the fallback is an authenticated refetch using the local session cookie, which requires Keychain-decrypting `Cookies`.
+
 ### Claude Accessibility Tree Quality
 
-Claude Desktop may not expose every timeline element semantically. Electron/WebView-backed content can appear as coarse groups, flattened text, or unlabeled custom elements. Mitigation: build diagnostics early, collect multiple attributes per element, and design fallback screenshot blocks.
-
-### Virtualized Conversation Rendering
-
-Long conversations may only keep a subset of messages in the accessibility tree at any time. Mitigation: scanning must be scroll-driven, incremental, cancellable, and deduplicated by content fingerprint.
-
-### Programmatic Scrolling
-
-The scroll container may not expose a reliable scroll pattern/action. Mitigation: try native scroll patterns first, then accessibility actions, then controlled input wheel events targeted at the window. Track scroll position, content changes, and no-progress loops.
+Confirmed on Windows: Claude Desktop often does not expose a readable UIA tree for the Chromium content root. This closed off UI scraping as a transcript source and is why the local-data readers exist. It still constrains the visual fallback and diagnostics paths.
 
 ### Image Capture
 

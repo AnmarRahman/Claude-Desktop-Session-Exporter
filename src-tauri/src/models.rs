@@ -124,11 +124,73 @@ pub struct VisibleContentCapture {
     pub warnings: Vec<String>,
 }
 
+/// A citation or file a block points at, when the content itself is not text.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatExportReference {
+    pub kind: String,
+    pub label: Option<String>,
+    pub url: Option<String>,
+}
+
+/// One piece of a message: prose, thinking, or a unit of tool activity.
+///
+/// Extraction and rendering stay separate, so an unrecognized block is kept with
+/// a descriptive `kind` rather than dropped.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatExportBlock {
+    pub kind: String,
+    pub text: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_input: Option<String>,
+    pub is_error: Option<bool>,
+    pub references: Vec<ChatExportReference>,
+    /// Verbatim payload of a block this build does not understand, so an
+    /// upstream change loses formatting rather than content.
+    pub raw: Option<String>,
+}
+
+impl ChatExportBlock {
+    pub fn empty(kind: &str) -> Self {
+        Self {
+            kind: kind.to_string(),
+            text: None,
+            tool_name: None,
+            tool_input: None,
+            is_error: None,
+            references: Vec::new(),
+            raw: None,
+        }
+    }
+
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: Some(text.into()),
+            ..Self::empty("text")
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatExportMessage {
     pub role: String,
+    /// The message's prose, excluding thinking and tool activity.
     pub text: String,
     pub timestamp: Option<String>,
+    pub blocks: Vec<ChatExportBlock>,
+}
+
+impl ChatExportMessage {
+    /// A message carrying nothing but prose, for sources without block structure.
+    // Used by the Claude Code reader, which is Windows-only today.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn plain(role: impl Into<String>, text: String, timestamp: Option<String>) -> Self {
+        Self {
+            role: role.into(),
+            blocks: vec![ChatExportBlock::text(text.clone())],
+            text,
+            timestamp,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,7 +205,15 @@ pub struct ChatExportResult {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChatExportOptions {
+    /// "auto" | "home" | "code".
     pub source: Option<String>,
+    /// Export this Home/Cowork conversation instead of the most recent one.
+    pub conversation_id: Option<String>,
+    /// Include Claude's thinking blocks. Off unless requested.
+    pub include_thinking: Option<bool>,
+    /// Include tool and Cowork activity. On unless disabled.
+    pub include_tools: Option<bool>,
 }

@@ -234,6 +234,26 @@ dd {
   padding: 0 10px;
 }
 
+.confirm-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid #ebca9b;
+  border-radius: 8px;
+  background: #fbf0de;
+}
+
+.confirm-bar p {
+  margin: 0;
+  flex: 1 1 260px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .actions.compact {
   margin-top: 0;
 }

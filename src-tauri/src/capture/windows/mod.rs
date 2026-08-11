@@ -1,13 +1,11 @@
 mod process;
-mod transcript;
 mod uia;
 mod visual;
-mod web_cache;
 
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::capture::{claude, CaptureAdapter, CaptureError};
+use crate::capture::{claude, transcript, web_cache, CaptureAdapter, CaptureError};
 use crate::models::{
     AccessibilitySnapshot, ChatExportOptions, ChatExportResult, ClaudeDetection,
     DiagnosticSaveResult, InspectorOptions, SessionMetadata, VisibleContentCapture,
@@ -151,19 +149,39 @@ impl CaptureAdapter for WindowsCaptureAdapter {
         &self,
         options: ChatExportOptions,
     ) -> Result<ChatExportResult, CaptureError> {
+        // `auto` must never fall back to a stale Claude Code transcript while
+        // Claude Desktop is showing Home/Chat.
         let shell_mode = web_cache::latest_shell_mode();
-        match options.source.as_deref().unwrap_or("auto") {
-            "home" => web_cache::export_latest_web_cache_transcript(),
-            "code" => transcript::export_latest_code_transcript(),
+        let mut result = match options.source.as_deref().unwrap_or("auto") {
+            "home" => return web_cache::export_web_conversation(&options),
+            "cowork" => {
+                return transcript::export_latest_session(transcript::SessionStore::Cowork)
+            }
+            "code" => {
+                return transcript::export_latest_session(transcript::SessionStore::ClaudeCode)
+            }
             _ if shell_mode == Some(web_cache::ShellMode::Chat) => {
-                web_cache::export_latest_web_cache_transcript()
+                web_cache::export_web_conversation(&options)
             }
             _ if shell_mode == Some(web_cache::ShellMode::Code) => {
-                transcript::export_latest_code_transcript()
-                    .or_else(|_| web_cache::export_latest_web_cache_transcript())
+                transcript::export_latest_session(transcript::SessionStore::Any)
+                    .or_else(|_| web_cache::export_web_conversation(&options))
             }
-            _ => web_cache::export_latest_web_cache_transcript()
-                .or_else(|_| transcript::export_latest_code_transcript()),
+            _ => web_cache::export_web_conversation(&options)
+                .or_else(|_| transcript::export_latest_session(transcript::SessionStore::Any)),
+        }?;
+
+        // Both mode keys are frequently compacted out of local storage, so
+        // `auto` often picks a source without knowing what is on screen. Say so
+        // rather than implying the choice was informed.
+        if shell_mode.is_none() {
+            result.warnings.insert(
+                0,
+                "Claude Desktop's current mode could not be read, so the source below was chosen without knowing which session is on screen. Check the title; if it is not the session you expected, pick a source explicitly and retry."
+                    .to_string(),
+            );
         }
+
+        Ok(result)
     }
 }

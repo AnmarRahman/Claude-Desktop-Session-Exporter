@@ -48,15 +48,19 @@ struct TranscriptExportDocument {
     messages: Vec<ChatExportMessage>,
 }
 
-pub fn export_latest_code_transcript() -> Result<ChatExportResult, CaptureError> {
-    let session = find_latest_session_candidate()?;
+pub fn export_latest_session(store: SessionStore) -> Result<ChatExportResult, CaptureError> {
+    let session = find_latest_session_candidate(store)?;
     let cli_session_id = session.metadata.cli_session_id.clone().ok_or_else(|| {
         CaptureError::Diagnostic(format!(
             "Claude session metadata at {} did not include a cliSessionId.",
             session.metadata_path.display()
         ))
     })?;
-    let transcript_path = find_transcript_path(session.metadata.cwd.as_deref(), &cli_session_id)?;
+    let transcript_path = find_transcript_path(
+        &session.metadata_path,
+        session.metadata.cwd.as_deref(),
+        &cli_session_id,
+    )?;
     let mut warnings = Vec::new();
     let (messages, title_from_transcript) = parse_transcript(&transcript_path, &mut warnings)?;
 
@@ -112,7 +116,7 @@ pub fn export_latest_code_transcript() -> Result<ChatExportResult, CaptureError>
     Ok(ChatExportResult {
         title,
         session_id: cli_session_id,
-        source_type: "Claude Code JSONL".to_string(),
+        source_type: store.label().to_string(),
         source_path: transcript_path.display().to_string(),
         markdown_path: markdown_path.display().to_string(),
         json_path: json_path.display().to_string(),
@@ -121,17 +125,23 @@ pub fn export_latest_code_transcript() -> Result<ChatExportResult, CaptureError>
     })
 }
 
+// Used by the Windows adapter's session summary.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn latest_session_metadata() -> Option<LatestSessionMetadata> {
-    find_latest_session_candidate()
+    latest_session_metadata_for(SessionStore::Any)
+}
+
+pub fn latest_session_metadata_for(store: SessionStore) -> Option<LatestSessionMetadata> {
+    find_latest_session_candidate(store)
         .ok()
         .map(|candidate| LatestSessionMetadata {
             title: candidate.metadata.title,
         })
 }
 
-fn find_latest_session_candidate() -> Result<SessionCandidate, CaptureError> {
+fn find_latest_session_candidate(store: SessionStore) -> Result<SessionCandidate, CaptureError> {
     let mut candidates = Vec::new();
-    for root in claude_code_session_roots()? {
+    for root in claude_code_session_roots(store)? {
         collect_session_candidates(&root, &mut candidates)?;
     }
 
@@ -146,47 +156,75 @@ fn find_latest_session_candidate() -> Result<SessionCandidate, CaptureError> {
         })
         .ok_or_else(|| {
             CaptureError::Diagnostic(
-                "No Claude Code session metadata was found for the current Windows user."
+                "No Claude Code or Cowork session metadata was found on this computer."
                     .to_string(),
             )
         })
 }
 
-fn claude_code_session_roots() -> Result<Vec<PathBuf>, CaptureError> {
-    let mut roots = Vec::new();
+/// Which local session store to read.
+///
+/// Both use the same `local_*.json` + JSONL format, but they are different
+/// products: Cowork sessions appear in Claude Desktop's Home sidebar, Claude
+/// Code sessions come from the CLI. They cannot be told apart after the fact, so
+/// the caller says which one it wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStore {
+    Cowork,
+    ClaudeCode,
+    Any,
+}
 
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        roots.push(
-            PathBuf::from(appdata)
-                .join("Claude")
-                .join("claude-code-sessions"),
-        );
+impl SessionStore {
+    fn directory_names(self) -> &'static [&'static str] {
+        match self {
+            SessionStore::Cowork => &["local-agent-mode-sessions"],
+            SessionStore::ClaudeCode => &["claude-code-sessions"],
+            SessionStore::Any => &["local-agent-mode-sessions", "claude-code-sessions"],
+        }
     }
 
-    if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
-        let packages = PathBuf::from(local_appdata).join("Packages");
-        if packages.exists() {
-            for entry in fs::read_dir(&packages)
-                .map_err(|error| CaptureError::Diagnostic(error.to_string()))?
-            {
-                let entry = entry.map_err(|error| CaptureError::Diagnostic(error.to_string()))?;
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.starts_with("claude_") {
-                    roots.push(
-                        entry
-                            .path()
-                            .join("LocalCache")
-                            .join("Roaming")
-                            .join("Claude")
-                            .join("claude-code-sessions"),
-                    );
-                }
-            }
+    fn label(self) -> &'static str {
+        match self {
+            SessionStore::Cowork => "Cowork session (local JSONL)",
+            SessionStore::ClaudeCode => "Claude Code JSONL",
+            SessionStore::Any => "Claude local session (JSONL)",
+        }
+    }
+}
+
+fn claude_code_session_roots(store: SessionStore) -> Result<Vec<PathBuf>, CaptureError> {
+    let mut roots = Vec::new();
+
+    for data_dir in crate::capture::web_cache::paths::claude_data_dirs() {
+        for name in store.directory_names() {
+            roots.push(data_dir.join(name));
         }
     }
 
     roots.retain(|root| root.exists());
     Ok(roots)
+}
+
+/// Home directories holding the shared `.claude/projects` store.
+///
+/// Both variables are consulted, most authoritative first: on Windows
+/// `USERPROFILE` is the real profile while `HOME` is often redirected by Git,
+/// MSYS, or Cygwin to somewhere else entirely.
+fn home_dirs() -> Vec<PathBuf> {
+    let ordered = if cfg!(windows) {
+        ["USERPROFILE", "HOME"]
+    } else {
+        ["HOME", "USERPROFILE"]
+    };
+
+    let mut dirs: Vec<PathBuf> = ordered
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .collect();
+    dirs.dedup();
+    dirs
 }
 
 fn collect_session_candidates(
@@ -199,7 +237,7 @@ fn collect_session_candidates(
         let entry = entry.map_err(|error| CaptureError::Diagnostic(error.to_string()))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_session_candidates(&path, candidates)?;
+            let _ = collect_session_candidates(&path, candidates);
             continue;
         }
 
@@ -211,10 +249,15 @@ fn collect_session_candidates(
             continue;
         }
 
-        let contents = fs::read_to_string(&path)
-            .map_err(|error| CaptureError::Diagnostic(error.to_string()))?;
-        let metadata: ClaudeCodeSessionMetadata = serde_json::from_str(&contents)
-            .map_err(|error| CaptureError::Diagnostic(error.to_string()))?;
+        // Claude Desktop rewrites these while running, so a torn or truncated
+        // read is expected. Skip the file rather than failing the whole scan and
+        // hiding every other session in the store.
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(metadata) = serde_json::from_str::<ClaudeCodeSessionMetadata>(&contents) else {
+            continue;
+        };
         if metadata.cli_session_id.is_none() {
             continue;
         }
@@ -235,29 +278,58 @@ fn collect_session_candidates(
     Ok(())
 }
 
-fn find_transcript_path(cwd: Option<&str>, cli_session_id: &str) -> Result<PathBuf, CaptureError> {
-    let projects_root = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .ok_or_else(|| CaptureError::Diagnostic("USERPROFILE is not set.".to_string()))?
-        .join(".claude")
-        .join("projects");
+/// Locates the JSONL transcript for a session.
+///
+/// A Cowork session running in host-loop mode has its own `.claude` home beside
+/// its metadata file — `local_<id>.json` sits next to `local_<id>/.claude/…` —
+/// so that is searched before the shared `~/.claude/projects` store used by
+/// Claude Code.
+fn find_transcript_path(
+    metadata_path: &Path,
+    cwd: Option<&str>,
+    cli_session_id: &str,
+) -> Result<PathBuf, CaptureError> {
+    let filename = format!("{cli_session_id}.jsonl");
+    let mut projects_roots = Vec::new();
 
-    if let Some(cwd) = cwd {
-        let direct = projects_root
-            .join(claude_project_directory_name(cwd))
-            .join(format!("{cli_session_id}.jsonl"));
-        if direct.exists() {
-            return Ok(direct);
+    if let Some(session_dir) = metadata_path
+        .file_stem()
+        .map(|stem| metadata_path.with_file_name(stem))
+    {
+        projects_roots.push(session_dir.join(".claude").join("projects"));
+    }
+    for home in home_dirs() {
+        projects_roots.push(home.join(".claude").join("projects"));
+    }
+    projects_roots.retain(|root| root.exists());
+    projects_roots.dedup();
+
+    for projects_root in &projects_roots {
+        if let Some(cwd) = cwd {
+            let direct = projects_root
+                .join(claude_project_directory_name(cwd))
+                .join(&filename);
+            if direct.exists() {
+                return Ok(direct);
+            }
+        }
+        if let Some(found) = find_file_recursive(projects_root, &filename)? {
+            return Ok(found);
         }
     }
 
-    let filename = format!("{cli_session_id}.jsonl");
-    find_file_recursive(&projects_root, &filename)?.ok_or_else(|| {
-        CaptureError::Diagnostic(format!(
-            "Could not find Claude transcript {filename} under {}.",
-            projects_root.display()
-        ))
-    })
+    Err(CaptureError::Diagnostic(format!(
+        "Could not find Claude transcript {filename}. Checked: {}.",
+        if projects_roots.is_empty() {
+            "no .claude/projects directory exists".to_string()
+        } else {
+            projects_roots
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    )))
 }
 
 fn find_file_recursive(directory: &Path, filename: &str) -> Result<Option<PathBuf>, CaptureError> {
@@ -322,26 +394,26 @@ fn parse_transcript(
             }
             Some("user") if is_human_user_message(&value) => {
                 if let Some(text) = extract_message_text(value.get("message")) {
-                    messages.push(ChatExportMessage {
-                        role: "user".to_string(),
+                    messages.push(ChatExportMessage::plain(
+                        "user",
                         text,
-                        timestamp: value
+                        value
                             .get("timestamp")
                             .and_then(Value::as_str)
                             .map(str::to_string),
-                    });
+                    ));
                 }
             }
             Some("assistant") => {
                 if let Some(text) = extract_message_text(value.get("message")) {
-                    messages.push(ChatExportMessage {
-                        role: "claude".to_string(),
+                    messages.push(ChatExportMessage::plain(
+                        "claude",
                         text,
-                        timestamp: value
+                        value
                             .get("timestamp")
                             .and_then(Value::as_str)
                             .map(str::to_string),
-                    });
+                    ));
                 }
             }
             _ => {}
@@ -402,6 +474,7 @@ fn coalesce_adjacent_messages(messages: Vec<ChatExportMessage>) -> Vec<ChatExpor
             if previous.role == message.role {
                 previous.text.push_str("\n\n");
                 previous.text.push_str(&message.text);
+                previous.blocks.extend(message.blocks);
                 if previous.timestamp.is_none() {
                     previous.timestamp = message.timestamp;
                 }
@@ -495,6 +568,75 @@ fn unix_timestamp_secs() -> Result<u64, CaptureError> {
 }
 
 #[cfg(test)]
+mod store_tests {
+    use super::{home_dirs, SessionStore};
+
+    /// Each store must resolve to its own directory. "Claude Code" resolving to
+    /// `Any` would let a Cowork session answer a Claude Code request.
+    #[test]
+    fn stores_map_to_distinct_directories() {
+        assert_eq!(
+            SessionStore::Cowork.directory_names(),
+            ["local-agent-mode-sessions"]
+        );
+        assert_eq!(
+            SessionStore::ClaudeCode.directory_names(),
+            ["claude-code-sessions"]
+        );
+        assert_eq!(SessionStore::Any.directory_names().len(), 2);
+    }
+
+    #[test]
+    fn stores_are_labelled_distinctly() {
+        let labels = [
+            SessionStore::Cowork.label(),
+            SessionStore::ClaudeCode.label(),
+            SessionStore::Any.label(),
+        ];
+        assert_eq!(
+            labels.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
+    }
+
+    /// On Windows `HOME` is frequently redirected by Git/MSYS, so the real
+    /// profile must be consulted first.
+    #[test]
+    fn home_directories_are_ordered_by_authority() {
+        let dirs = home_dirs();
+        if cfg!(windows) {
+            if let (Some(profile), Some(first)) =
+                (std::env::var_os("USERPROFILE"), dirs.first())
+            {
+                assert_eq!(first.as_os_str(), profile);
+            }
+        } else if let (Some(home), Some(first)) = (std::env::var_os("HOME"), dirs.first()) {
+            assert_eq!(first.as_os_str(), home);
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    /// Exports the newest Cowork session from this machine's Claude Desktop.
+    /// Not hermetic: `cargo test -- --ignored --nocapture cowork`.
+    #[test]
+    #[ignore = "requires a local Cowork session"]
+    fn exports_the_newest_cowork_session() {
+        let metadata = super::latest_session_metadata_for(super::SessionStore::Cowork);
+        eprintln!("newest Cowork session title: {:?}", metadata.and_then(|m| m.title));
+
+        let result = super::export_latest_session(super::SessionStore::Cowork)
+            .expect("Cowork export should succeed");
+        eprintln!(
+            "exported {:?} — {} messages\n  {}",
+            result.title, result.message_count, result.markdown_path
+        );
+        assert!(result.message_count > 0);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use serde_json::json;
 
@@ -557,16 +699,8 @@ mod tests {
     #[test]
     fn coalesces_adjacent_messages_with_same_role() {
         let messages = vec![
-            ChatExportMessage {
-                role: "claude".to_string(),
-                text: "One".to_string(),
-                timestamp: Some("t1".to_string()),
-            },
-            ChatExportMessage {
-                role: "claude".to_string(),
-                text: "Two".to_string(),
-                timestamp: Some("t2".to_string()),
-            },
+            ChatExportMessage::plain("claude", "One".to_string(), Some("t1".to_string())),
+            ChatExportMessage::plain("claude", "Two".to_string(), Some("t2".to_string())),
         ];
 
         let coalesced = coalesce_adjacent_messages(messages);
