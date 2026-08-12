@@ -42,6 +42,20 @@ const captureOptions = [
   "File cards",
 ];
 
+type ExportFormat = "markdown" | "json" | "pdf";
+
+const exportFormatOptions: Array<{ key: ExportFormat; label: string; description: string }> = [
+  { key: "markdown", label: "Markdown", description: "Readable plain-text transcript" },
+  { key: "json", label: "JSON", description: "Structured archive for reuse" },
+  { key: "pdf", label: "PDF", description: "Formatted document for sharing" },
+];
+
+function formatList(items: string[]): string {
+  if (items.length < 2) return items[0] ?? "";
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
 const emptyDetection: ClaudeDetection = {
   detected: false,
   platform: "unknown",
@@ -89,6 +103,11 @@ function App() {
   const [isOpeningExportDirectory, setIsOpeningExportDirectory] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [exportDirectory, setExportDirectory] = useState(storedExportDirectory);
+  const [exportFormats, setExportFormats] = useState<Record<ExportFormat, boolean>>({
+    markdown: true,
+    json: true,
+    pdf: true,
+  });
   const [developerMode, setDeveloperMode] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inspectorError, setInspectorError] = useState<string | null>(null);
@@ -110,6 +129,9 @@ function App() {
     detection.detected
     && selectedLocalSession !== null
     && localDiscovery?.active_session_id === selectedLocalSession.cli_session_id;
+  const selectedExportFormatLabels = exportFormatOptions
+    .filter((format) => exportFormats[format.key])
+    .map((format) => format.label);
 
   const visibleLocalSessions = useMemo(() => {
     const query = sessionSearch.trim().toLocaleLowerCase();
@@ -265,8 +287,9 @@ function App() {
     // so Auto can resolve to a stale Home chat while a local session is open.
     const localTarget = exportSource !== "auto" ? selectedLocalSession : null;
     const target = localTarget?.title;
+    const formats = formatList(selectedExportFormatLabels);
     requestConfirm(
-      `Export ${SOURCE_LABELS[exportSource]} — ${target ? `"${target}"` : "the most recent available conversation"} — as Markdown, JSON, and PDF into ${exportDirectory ? `"${exportDirectory}"` : "the default extraction directory"}.`,
+      `Export ${SOURCE_LABELS[exportSource]} — ${target ? `"${target}"` : "the most recent available conversation"} — as ${formats} into ${exportDirectory ? `"${exportDirectory}"` : "the default extraction directory"}.`,
       "Export Transcript",
       runExportChatTranscript,
     );
@@ -282,10 +305,15 @@ function App() {
         source: exportSource,
         conversation_id: exportSource === "auto" ? undefined : selectedLocalSession?.cli_session_id,
         output_directory: exportDirectory || undefined,
+        export_markdown: exportFormats.markdown,
+        export_json: exportFormats.json,
+        export_pdf: exportFormats.pdf,
       };
       const result = await invoke<ChatExportResult>("export_chat_transcript", { options });
       setChatExport(result);
-      setInspectorMessage(`Exported ${result.message_count.toLocaleString()} chat messages to Markdown, JSON, and PDF.`);
+      setInspectorMessage(
+        `Exported ${result.message_count.toLocaleString()} chat messages as ${formatList(selectedExportFormatLabels)}.`,
+      );
     } catch (unknownError) {
       const message = formatInvokeError(unknownError);
       setError(message);
@@ -294,6 +322,14 @@ function App() {
     } finally {
       setIsExportingChat(false);
     }
+  }
+
+  function toggleExportFormat(format: ExportFormat) {
+    setExportFormats((current) => {
+      const selectedCount = Object.values(current).filter(Boolean).length;
+      if (current[format] && selectedCount === 1) return current;
+      return { ...current, [format]: !current[format] };
+    });
   }
 
   async function chooseExportDirectory() {
@@ -509,6 +545,36 @@ function App() {
             </div>
           </div>
 
+          <div className="export-format-options">
+            <div>
+              <p className="label">Export file types</p>
+              <p className="muted">Choose one, two, or all three formats.</p>
+            </div>
+            <div className="format-grid">
+              {exportFormatOptions.map((format) => {
+                const isLastSelected = exportFormats[format.key] && selectedExportFormatLabels.length === 1;
+                return (
+                  <label
+                    key={format.key}
+                    className={`format-option${exportFormats[format.key] ? " selected" : ""}`}
+                    title={isLastSelected ? "At least one file type must remain selected." : undefined}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={exportFormats[format.key]}
+                      disabled={isExportingChat || pendingConfirm !== null || isLastSelected}
+                      onChange={() => toggleExportFormat(format.key)}
+                    />
+                    <span>
+                      <strong>{format.label}</strong>
+                      <small>{format.description}</small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="export-directory">
             <div className="export-directory-copy">
               <p className="label">Extraction directory</p>
@@ -583,7 +649,7 @@ function App() {
               className="primary"
               type="button"
               disabled={isExportingChat || pendingConfirm !== null || (exportSource !== "auto" && !selectedLocalSession)}
-              title="Exports the selected Claude transcript to local Markdown, JSON, and PDF files."
+              title={`Exports the selected Claude transcript as ${formatList(selectedExportFormatLabels)}.`}
               aria-label="Export Claude chat transcript"
               onClick={exportChatTranscript}
             >
@@ -614,9 +680,9 @@ function App() {
                 <strong>Transcript extracted successfully</strong>
                 <p>{chatExport.message_count.toLocaleString()} messages from “{chatExport.title}”.</p>
                 <dl>
-                  <div><dt>PDF</dt><dd>{chatExport.pdf_path}</dd></div>
-                  <div><dt>Markdown</dt><dd>{chatExport.markdown_path}</dd></div>
-                  <div><dt>JSON</dt><dd>{chatExport.json_path}</dd></div>
+                  {chatExport.pdf_path && <div><dt>PDF</dt><dd>{chatExport.pdf_path}</dd></div>}
+                  {chatExport.markdown_path && <div><dt>Markdown</dt><dd>{chatExport.markdown_path}</dd></div>}
+                  {chatExport.json_path && <div><dt>JSON</dt><dd>{chatExport.json_path}</dd></div>}
                 </dl>
                 <button
                   className="secondary export-open-folder"
@@ -862,9 +928,9 @@ function App() {
                   <p><strong>Title:</strong> {chatExport.title}</p>
                   <p><strong>Source Type:</strong> {chatExport.source_type}</p>
                   <p><strong>Messages:</strong> {chatExport.message_count.toLocaleString()}</p>
-                  <p><strong>Markdown:</strong> {chatExport.markdown_path}</p>
-                  <p><strong>JSON:</strong> {chatExport.json_path}</p>
-                  <p><strong>PDF:</strong> {chatExport.pdf_path}</p>
+                  {chatExport.markdown_path && <p><strong>Markdown:</strong> {chatExport.markdown_path}</p>}
+                  {chatExport.json_path && <p><strong>JSON:</strong> {chatExport.json_path}</p>}
+                  {chatExport.pdf_path && <p><strong>PDF:</strong> {chatExport.pdf_path}</p>}
                   <p><strong>Source:</strong> {chatExport.source_path}</p>
                 </div>
               ) : (

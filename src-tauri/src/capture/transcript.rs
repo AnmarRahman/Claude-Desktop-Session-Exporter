@@ -6,11 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::capture::output::prepare_export_directory;
+use crate::capture::output::{
+    prepare_export_directory, reserve_export_paths, ExportFormats, ExportPaths,
+};
 use crate::capture::pdf::{self, PdfTranscript};
 use crate::capture::{cowork, CaptureError};
 use crate::filename::sanitize_filename_part;
-use crate::models::{ChatExportMessage, ChatExportResult, LocalSessionSummary};
+use crate::models::{ChatExportMessage, ChatExportOptions, ChatExportResult, LocalSessionSummary};
 
 #[derive(Debug, Clone)]
 pub struct LatestSessionMetadata {
@@ -36,9 +38,9 @@ struct TranscriptExportDocument {
 
 pub fn export_latest_session(
     store: SessionStore,
-    output_directory: Option<&str>,
+    options: &ChatExportOptions,
 ) -> Result<ChatExportResult, CaptureError> {
-    export_session(store, None, output_directory)
+    export_session(store, None, options)
 }
 
 /// Export one discovered local session by its canonical JSONL filename stem, or
@@ -46,7 +48,7 @@ pub fn export_latest_session(
 pub fn export_session(
     store: SessionStore,
     cli_session_id: Option<&str>,
-    output_directory: Option<&str>,
+    options: &ChatExportOptions,
 ) -> Result<ChatExportResult, CaptureError> {
     let discovery = cowork::discover_default();
     let session = discovery
@@ -81,15 +83,11 @@ pub fn export_session(
         session.title.clone()
     };
 
-    let exports_dir = prepare_export_directory(output_directory)?;
+    let formats = ExportFormats::from_options(options)?;
+    let exports_dir = prepare_export_directory(options.output_directory.as_deref())?;
 
     let timestamp = unix_timestamp_secs()?;
     let filename_title = sanitize_filename_part(&title, "Claude Session");
-    let basename = format!("{filename_title}-{timestamp}");
-    let markdown_path = exports_dir.join(format!("{basename}.md"));
-    let json_path = exports_dir.join(format!("{basename}.json"));
-    let pdf_path = exports_dir.join(format!("{basename}.pdf"));
-
     let document = TranscriptExportDocument {
         title: title.clone(),
         session_id: session
@@ -108,22 +106,33 @@ pub fn export_session(
         messages: messages.clone(),
     };
 
-    let json = serde_json::to_string_pretty(&document)
+    let json = formats
+        .json
+        .then(|| serde_json::to_string_pretty(&document))
+        .transpose()
         .map_err(|error| CaptureError::Diagnostic(error.to_string()))?;
-    let (pdf_bytes, pdf_warnings) = pdf::render_pdf(&PdfTranscript {
-        title: &document.title,
-        source_type: &document.source_type,
-        session_id: &document.session_id,
-        model: document.model.as_deref(),
-        messages: &document.messages,
-    })?;
-    let written = fs::write(&json_path, json)
-        .and_then(|()| fs::write(&markdown_path, render_markdown(&document)))
-        .and_then(|()| fs::write(&pdf_path, pdf_bytes));
+    let markdown = formats.markdown.then(|| render_markdown(&document));
+    let (pdf_bytes, pdf_warnings) = if formats.pdf {
+        let (bytes, warnings) = pdf::render_pdf(&PdfTranscript {
+            title: &document.title,
+            source_type: &document.source_type,
+            session_id: &document.session_id,
+            model: document.model.as_deref(),
+            messages: &document.messages,
+        })?;
+        (Some(bytes), warnings)
+    } else {
+        (None, Vec::new())
+    };
+    let paths = reserve_export_paths(&exports_dir, &filename_title, timestamp, formats)?;
+    let written = write_selected_files(
+        &paths,
+        markdown.as_deref(),
+        json.as_deref(),
+        pdf_bytes.as_deref(),
+    );
     if let Err(error) = written {
-        let _ = fs::remove_file(&json_path);
-        let _ = fs::remove_file(&markdown_path);
-        let _ = fs::remove_file(&pdf_path);
+        paths.remove_files();
         return Err(CaptureError::Diagnostic(error.to_string()));
     }
     warnings.extend(pdf_warnings);
@@ -133,13 +142,35 @@ pub fn export_session(
         session_id: session.cli_session_id.clone(),
         source_type: session.source_type.clone(),
         source_path: transcript_path.display().to_string(),
-        markdown_path: markdown_path.display().to_string(),
-        json_path: json_path.display().to_string(),
-        pdf_path: pdf_path.display().to_string(),
+        markdown_path: optional_path_string(paths.markdown),
+        json_path: optional_path_string(paths.json),
+        pdf_path: optional_path_string(paths.pdf),
         output_directory: exports_dir.display().to_string(),
         message_count: messages.len(),
         warnings,
     })
+}
+
+fn write_selected_files(
+    paths: &ExportPaths,
+    markdown: Option<&str>,
+    json: Option<&str>,
+    pdf: Option<&[u8]>,
+) -> std::io::Result<()> {
+    if let (Some(path), Some(contents)) = (&paths.markdown, markdown) {
+        fs::write(path, contents)?;
+    }
+    if let (Some(path), Some(contents)) = (&paths.json, json) {
+        fs::write(path, contents)?;
+    }
+    if let (Some(path), Some(contents)) = (&paths.pdf, pdf) {
+        fs::write(path, contents)?;
+    }
+    Ok(())
+}
+
+fn optional_path_string(path: Option<std::path::PathBuf>) -> Option<String> {
+    path.map(|path| path.display().to_string())
 }
 
 // Used by the Windows adapter's session summary.
@@ -530,11 +561,16 @@ mod live_tests {
             metadata.and_then(|m| m.title)
         );
 
-        let result = super::export_latest_session(super::SessionStore::Cowork, None)
-            .expect("Cowork export should succeed");
+        let result = super::export_latest_session(
+            super::SessionStore::Cowork,
+            &crate::models::ChatExportOptions::default(),
+        )
+        .expect("Cowork export should succeed");
         eprintln!(
             "exported {:?} — {} messages\n  {}",
-            result.title, result.message_count, result.markdown_path
+            result.title,
+            result.message_count,
+            result.markdown_path.as_deref().unwrap_or("not generated")
         );
         assert!(result.message_count > 0);
     }

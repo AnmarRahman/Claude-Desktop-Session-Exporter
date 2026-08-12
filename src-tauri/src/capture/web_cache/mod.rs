@@ -416,7 +416,7 @@ pub fn export_web_conversation(
             ));
         }
 
-        return export::write_export(&document, warnings, options.output_directory.as_deref());
+        return export::write_export(&document, warnings, options);
     }
 
     Err(CaptureError::Diagnostic(format!(
@@ -639,11 +639,14 @@ mod tests {
         .expect("export should succeed");
         eprintln!(
             "exported {:?} — {} messages\n  {}\n  {}",
-            result.title, result.message_count, result.markdown_path, result.json_path
+            result.title,
+            result.message_count,
+            result.markdown_path.as_deref().unwrap_or("not generated"),
+            result.json_path.as_deref().unwrap_or("not generated")
         );
         assert!(result.message_count > 0);
-        assert!(std::path::Path::new(&result.markdown_path).exists());
-        assert!(std::path::Path::new(&result.json_path).exists());
+        assert!(std::path::Path::new(result.markdown_path.as_ref().unwrap()).exists());
+        assert!(std::path::Path::new(result.json_path.as_ref().unwrap()).exists());
     }
 
     #[test]

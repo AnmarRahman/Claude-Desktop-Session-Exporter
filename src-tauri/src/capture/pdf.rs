@@ -1,22 +1,21 @@
-//! Native, local PDF rendering for normalized Claude transcripts.
+//! Polished, local HTML-to-PDF rendering for normalized Claude transcripts.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
 use printpdf::{
-    BuiltinFont, Color, Mm, Op, ParsedFont, PdfDocument, PdfFontHandle, PdfPage, PdfSaveOptions,
-    Point, Pt, Rgb, TextItem,
+    Base64OrRaw, BuiltinFont, Color, GeneratePdfOptions, Op, PdfDocument, PdfFontHandle,
+    PdfSaveOptions, Point, Pt, Rgb, TextItem,
 };
+use pulldown_cmark::{html, Options, Parser};
 
 use crate::capture::CaptureError;
 use crate::models::{ChatExportBlock, ChatExportMessage};
 
 const PAGE_WIDTH_PT: f32 = 595.28;
-const PAGE_HEIGHT_PT: f32 = 841.89;
-const LEFT: f32 = 48.0;
-const RIGHT: f32 = 48.0;
-const TOP: f32 = 70.0;
-const BOTTOM: f32 = 48.0;
+const FOOTER_LEFT: f32 = 45.0;
+const FOOTER_Y: f32 = 19.0;
 
 pub struct PdfTranscript<'a> {
     pub title: &'a str,
@@ -26,84 +25,419 @@ pub struct PdfTranscript<'a> {
     pub messages: &'a [ChatExportMessage],
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LineStyle {
-    Title,
-    Metadata,
-    User,
-    Claude,
-    Body,
-    Thinking,
-    Tool,
-    Reference,
-}
-
-#[derive(Clone)]
-struct StyledLine {
-    text: String,
-    style: LineStyle,
-    space_before: f32,
-}
-
 pub fn render_pdf(document: &PdfTranscript<'_>) -> Result<(Vec<u8>, Vec<String>), CaptureError> {
-    let mut pdf = PdfDocument::new(document.title);
+    let html = transcript_html(document);
+    let images = BTreeMap::new();
+    let mut fonts = BTreeMap::new();
+    let mut warnings = Vec::new();
+
+    if let Some((name, bytes)) = load_html_font() {
+        fonts.insert(name, Base64OrRaw::Raw(bytes));
+    } else {
+        warnings.push(
+            "No preferred system font was available; the PDF used the renderer's sans-serif fallback."
+                .to_string(),
+        );
+    }
+
+    let options = GeneratePdfOptions {
+        font_embedding: Some(true),
+        page_width: Some(210.0),
+        page_height: Some(297.0),
+        margin_top: Some(14.0),
+        margin_right: Some(15.0),
+        margin_bottom: Some(17.0),
+        margin_left: Some(15.0),
+        image_optimization: None,
+        // We draw a quieter custom footer after layout so it can omit the cover.
+        show_page_numbers: Some(false),
+        header_text: None,
+        footer_text: None,
+        skip_first_page: Some(true),
+    };
+
+    let mut render_warnings = Vec::new();
+    let mut pdf = PdfDocument::from_html(&html, &images, &fonts, &options, &mut render_warnings)
+        .map_err(|error| CaptureError::Diagnostic(format!("Could not lay out PDF: {error}")))?;
+
     let now = printpdf::date::OffsetDateTime::now();
     pdf.metadata.info.creation_date = now;
     pdf.metadata.info.modification_date = now;
     pdf.metadata.info.metadata_date = now;
-    pdf.metadata.info.document_title = document.title.to_string();
+    pdf.metadata.info.document_title = clean_display_title(document.title);
     pdf.metadata.info.creator = "Claude Session Exporter".to_string();
     pdf.metadata.info.producer = "Claude Session Exporter".to_string();
     pdf.metadata.info.subject = "Local Claude transcript export".to_string();
-    let (font, mut warnings) = load_font(&mut pdf);
-    let lines = transcript_lines(document);
-    let pages = paginate(&lines);
-    let total_pages = pages.len();
-    let pdf_pages = pages
-        .into_iter()
-        .enumerate()
-        .map(|(index, page)| render_page(&font, document.title, &page, index + 1, total_pages))
-        .collect();
-    let options = PdfSaveOptions {
+
+    let total_pages = pdf.pages.len();
+    for (index, page) in pdf.pages.iter_mut().enumerate() {
+        if index == 0 {
+            continue;
+        }
+        add_footer(&mut page.ops, index + 1, total_pages);
+    }
+
+    if !render_warnings.is_empty() {
+        warnings.push(format!(
+            "PDF layout reported {} non-fatal warning(s).",
+            render_warnings.len()
+        ));
+    }
+
+    let save_options = PdfSaveOptions {
         subset_fonts: true,
         optimize: true,
         ..PdfSaveOptions::default()
     };
-    let mut pdf_warnings = Vec::new();
-    let bytes = pdf.with_pages(pdf_pages).save(&options, &mut pdf_warnings);
+    let mut save_warnings = Vec::new();
+    let bytes = pdf.save(&save_options, &mut save_warnings);
     if bytes.is_empty() {
         return Err(CaptureError::Diagnostic(
             "PDF renderer returned an empty document.".to_string(),
         ));
     }
-    if !pdf_warnings.is_empty() {
+    if !save_warnings.is_empty() {
         warnings.push(format!(
-            "PDF renderer reported {} non-fatal warning(s).",
-            pdf_warnings.len()
+            "PDF writer reported {} non-fatal warning(s).",
+            save_warnings.len()
         ));
     }
     Ok((bytes, warnings))
 }
 
-fn load_font(pdf: &mut PdfDocument) -> (PdfFontHandle, Vec<String>) {
-    let candidates = font_candidates();
-    for path in &candidates {
-        let Ok(bytes) = fs::read(path) else {
-            continue;
-        };
-        let mut parse_warnings = Vec::new();
-        if let Some(parsed) = ParsedFont::from_bytes(&bytes, 0, &mut parse_warnings) {
-            let id = pdf.add_font(&parsed);
-            return (PdfFontHandle::External(id), Vec::new());
+fn transcript_html(document: &PdfTranscript<'_>) -> String {
+    let mut messages = String::new();
+    for message in document.messages {
+        messages.push_str(&message_html(message));
+    }
+
+    let model = document
+        .model
+        .map(|value| metadata_row("Model", value))
+        .unwrap_or_default();
+    let title = escape_html(&clean_display_title(document.title));
+    let source = escape_html(document.source_type);
+    let session = escape_html(document.session_id);
+    let count = document.messages.len();
+
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0;
+    color: #272522;
+    font-family: ChatSans, Arial, sans-serif;
+    font-size: 10.25pt;
+    line-height: 1.52;
+  }}
+  .cover {{
+    min-height: 252mm;
+    page-break-after: always;
+    position: relative;
+    padding: 18mm 10mm 12mm;
+  }}
+  .cover-rule {{ width: 17mm; height: 3px; background: #d97757; margin-bottom: 17mm; }}
+  .cover-kicker {{ color: #6f6a62; font-size: 9pt; font-weight: 700; letter-spacing: 1.4px; text-transform: uppercase; }}
+  .cover h1 {{
+    color: #22201e;
+    font-size: 28pt;
+    font-weight: 600;
+    line-height: 1.13;
+    margin: 8mm 0 16mm;
+  }}
+  .cover-summary {{ color: #5f5a53; font-size: 11pt; margin-bottom: 13mm; max-width: 135mm; }}
+  .metadata {{ border-top: 1px solid #dedbd5; padding-top: 7mm; width: 100%; }}
+  .metadata-row {{ margin-bottom: 3.5mm; }}
+  .metadata-label {{ color: #8a847b; display: inline-block; font-size: 8pt; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; width: 26mm; }}
+  .metadata-value {{ color: #3e3a36; font-size: 9.5pt; }}
+  .cover-count {{ color: #d97757; font-size: 9pt; font-weight: 700; margin-top: 10mm; }}
+  .conversation {{ padding: 2mm 0 0; }}
+  .message {{ margin: 0 0 10mm; }}
+  .assistant-header {{
+    color: #2d2a27;
+    font-size: 9.5pt;
+    font-weight: 700;
+    margin: 0 0 4mm;
+    page-break-after: avoid;
+  }}
+  .claude-mark {{ color: #d97757; font-size: 18pt; line-height: .5; margin-right: 2.5mm; vertical-align: -1pt; }}
+  .message-time {{ color: #98938c; font-size: 7.5pt; font-weight: 400; margin-left: 3mm; }}
+  .assistant-body {{ padding-left: 1mm; }}
+  .user {{ break-inside: avoid; page-break-inside: avoid; margin: 7mm 0 11mm 24%; text-align: left; }}
+  .user-meta {{ color: #7c7770; font-size: 7.5pt; margin: 0 2mm 2mm 0; page-break-after: avoid; text-align: right; }}
+  .user-name {{ color: #2f2c28; font-size: 9pt; font-weight: 700; margin-left: 2mm; }}
+  .user-bubble {{
+    background: #f2f3f4;
+    border: 1px solid #e8e9ea;
+    border-radius: 7px;
+    break-inside: avoid;
+    color: #292724;
+    display: block;
+    page-break-inside: avoid;
+    padding: 4mm 5mm;
+    text-align: left;
+    width: 100%;
+  }}
+  p {{ margin: 0 0 4.3mm; orphans: 3; widows: 3; }}
+  h1, h2, h3, h4 {{ color: #282522; font-weight: 700; line-height: 1.28; page-break-after: avoid; }}
+  h1 {{ font-size: 17pt; margin: 8mm 0 4mm; }}
+  h2 {{ font-size: 13.5pt; margin: 7mm 0 3mm; }}
+  h3 {{ font-size: 11.5pt; margin: 6mm 0 2.5mm; }}
+  h4 {{ font-size: 10.5pt; margin: 5mm 0 2mm; }}
+  strong {{ font-weight: 700; color: #1f1d1b; }}
+  em {{ color: #56514b; }}
+  ul, ol {{ margin: 1mm 0 5mm 7mm; padding-left: 5mm; }}
+  ol {{ list-style-type: none; }}
+  li {{ margin-bottom: 2mm; padding-left: 1mm; }}
+  blockquote {{ border-left: 3px solid #d9a18f; color: #59544e; margin: 4mm 0; padding: 2mm 0 2mm 5mm; }}
+  a {{ color: #3176a8; text-decoration: underline; }}
+  code {{ background: #f2f2f1; color: #b4543c; font-family: monospace; font-size: 8.5pt; padding: 1px 3px; }}
+  pre {{
+    background: #f4f4f3;
+    border: 1px solid #e7e5e2;
+    color: #48444e;
+    font-family: monospace;
+    font-size: 8.1pt;
+    line-height: 1.46;
+    margin: 4mm 0 6mm;
+    padding: 5mm;
+    white-space: pre-wrap;
+  }}
+  pre code {{ background: transparent; color: inherit; padding: 0; }}
+  table {{ border-collapse: collapse; font-size: 8.5pt; margin: 4mm 0 6mm; width: 100%; }}
+  th {{ background: #eeeae5; color: #37332f; font-weight: 700; padding: 2.5mm; text-align: left; }}
+  td {{ border-bottom: 1px solid #e1ddd8; padding: 2.5mm; vertical-align: top; }}
+  hr {{ border: 0; border-top: 1px solid #dedbd6; margin: 7mm 0; }}
+  .activity {{
+    background: #f6f4f0;
+    border-left: 3px solid #b7a890;
+    margin: 4mm 0 6mm;
+    padding: 4mm 5mm;
+  }}
+  .activity.error {{ background: #fbefec; border-left-color: #bf674e; }}
+  .activity-label {{ color: #77634e; font-size: 8pt; font-weight: 700; letter-spacing: .5px; margin-bottom: 2mm; text-transform: uppercase; }}
+  .activity pre {{ background: #eeece8; border: 0; margin: 2mm 0 0; padding: 3mm; }}
+  .thinking {{ background: #f7f6f4; border-left: 3px solid #c9c3ba; color: #656059; margin: 4mm 0; padding: 4mm 5mm; }}
+  .thinking-label {{ color: #8b857c; font-size: 8pt; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; }}
+  .file-card {{ background: #f3f5f6; border: 1px solid #e3e6e8; margin: 3mm 0; padding: 3mm 4mm; }}
+  .file-kind {{ color: #7d7871; font-size: 7.5pt; font-weight: 700; text-transform: uppercase; }}
+  .references {{ color: #4d6577; font-size: 8.5pt; margin-top: 3mm; }}
+  .raw-label {{ color: #8b857c; font-size: 7.5pt; font-weight: 700; margin-top: 3mm; text-transform: uppercase; }}
+</style>
+</head>
+<body>
+  <section class="cover">
+    <div class="cover-rule"></div>
+    <div class="cover-kicker">Claude Session Export</div>
+    <h1>{title}</h1>
+    <p class="cover-summary">A complete local transcript, formatted for comfortable reading and long-term reference.</p>
+    <div class="metadata">
+      {source_row}
+      {session_row}
+      {model}
+    </div>
+    <div class="cover-count">{count} messages archived</div>
+  </section>
+  <main class="conversation">{messages}</main>
+</body>
+</html>"#,
+        source_row = metadata_row("Source", &source),
+        session_row = metadata_row("Session", &session),
+    )
+}
+
+fn metadata_row(label: &str, value: &str) -> String {
+    format!(
+        "<div class=\"metadata-row\"><span class=\"metadata-label\">{}</span><span class=\"metadata-value\">{}</span></div>",
+        escape_html(label),
+        escape_html(value)
+    )
+}
+
+fn clean_display_title(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|character| matches!(character, '*' | '#' | '_' | '`'))
+        .trim()
+        .to_string()
+}
+
+fn message_html(message: &ChatExportMessage) -> String {
+    let contents = if message.blocks.is_empty() {
+        markdown_html(&message.text)
+    } else {
+        message.blocks.iter().map(block_html).collect()
+    };
+    let assistant_timestamp = message
+        .timestamp
+        .as_deref()
+        .map(|value| {
+            format!(
+                "<span class=\"message-time\"> · {}</span>",
+                escape_html(value)
+            )
+        })
+        .unwrap_or_default();
+    let user_timestamp = message
+        .timestamp
+        .as_deref()
+        .map(|value| format!("{} · ", escape_html(value)))
+        .unwrap_or_default();
+
+    if contents.trim().is_empty() {
+        return String::new();
+    }
+
+    if message.role == "user" {
+        format!(
+            "<section class=\"message user\"><div class=\"user-meta\">{user_timestamp}<span class=\"user-name\">You asked</span></div><div class=\"user-bubble\">{contents}</div></section>"
+        )
+    } else {
+        format!(
+            "<section class=\"message assistant\"><div class=\"assistant-header\"><span class=\"claude-mark\">✦</span>Claude{assistant_timestamp}</div><div class=\"assistant-body\">{contents}</div></section>"
+        )
+    }
+}
+
+fn block_html(block: &ChatExportBlock) -> String {
+    let text = block.text.as_deref().unwrap_or("").trim();
+    let mut rendered = match block.kind.as_str() {
+        "text" => markdown_html(text),
+        "thinking" => format!(
+            "<aside class=\"thinking\"><div class=\"thinking-label\">Thinking</div>{}</aside>",
+            markdown_html(text)
+        ),
+        "tool_use" | "tool_result" => {
+            let error_class = if block.is_error == Some(true) {
+                " error"
+            } else {
+                ""
+            };
+            let label = if block.kind == "tool_use" {
+                "Tool"
+            } else {
+                "Tool result"
+            };
+            let name = escape_html(block.tool_name.as_deref().unwrap_or("activity"));
+            let mut body = if text.is_empty() {
+                String::new()
+            } else {
+                markdown_html(text)
+            };
+            if let Some(input) = &block.tool_input {
+                body.push_str(&format!("<pre>{}</pre>", escape_html(input)));
+            }
+            format!(
+                "<aside class=\"activity{error_class}\"><div class=\"activity-label\">{label} - {name}</div>{body}</aside>"
+            )
+        }
+        "attachment" | "file" => {
+            let label = block
+                .references
+                .first()
+                .and_then(|reference| reference.label.as_deref())
+                .unwrap_or(block.kind.as_str());
+            format!(
+                "<div class=\"file-card\"><span class=\"file-kind\">{}</span><br />{}</div>",
+                escape_html(&block.kind),
+                escape_html(label)
+            )
+        }
+        other => {
+            let prose = if text.is_empty() {
+                String::new()
+            } else {
+                markdown_html(text)
+            };
+            format!(
+                "<aside class=\"activity\"><div class=\"activity-label\">{}</div>{prose}</aside>",
+                escape_html(other)
+            )
+        }
+    };
+
+    if let Some(raw) = &block.raw {
+        rendered.push_str(&format!(
+            "<div class=\"raw-label\">Preserved source data</div><pre>{}</pre>",
+            escape_html(raw)
+        ));
+    }
+    if !block.references.is_empty() && !matches!(block.kind.as_str(), "attachment" | "file") {
+        rendered.push_str("<ul class=\"references\">");
+        for reference in &block.references {
+            let label = reference
+                .label
+                .as_deref()
+                .or(reference.url.as_deref())
+                .unwrap_or(&reference.kind);
+            let value = match &reference.url {
+                Some(url) if url != label => format!("{} - {}", label, url),
+                _ => label.to_string(),
+            };
+            rendered.push_str(&format!("<li>{}</li>", escape_html(&value)));
+        }
+        rendered.push_str("</ul>");
+    }
+    rendered
+}
+
+fn markdown_html(markdown: &str) -> String {
+    if markdown.trim().is_empty() {
+        return String::new();
+    }
+    let markdown = normalize_ordered_list_markers(markdown);
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    let parser = Parser::new_ext(&markdown, options);
+    let mut output = String::new();
+    html::push_html(&mut output, parser);
+    output
+}
+
+/// printpdf's HTML bridge currently paints ordered-list markers twice. Turning
+/// them into ordinary Markdown paragraphs keeps the visible numbering and all
+/// inline emphasis without asking the bridge to synthesize list counters.
+fn normalize_ordered_list_markers(markdown: &str) -> String {
+    let mut normalized = String::with_capacity(markdown.len());
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+        let ordered = digits > 0
+            && trimmed
+                .get(digits..)
+                .is_some_and(|remainder| remainder.starts_with(". "));
+        if ordered {
+            let number = &trimmed[..digits];
+            let content = &trimmed[digits + 2..];
+            normalized.push_str(&format!("**{number}.** {content}\n\n"));
+        } else {
+            normalized.push_str(line);
+            normalized.push('\n');
         }
     }
-    (
-        PdfFontHandle::Builtin(BuiltinFont::Helvetica),
-        vec![
-            "No Unicode system font was available; the PDF used Helvetica and may replace unsupported characters."
-                .to_string(),
-        ],
-    )
+    normalized
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn load_html_font() -> Option<(String, Vec<u8>)> {
+    font_candidates()
+        .into_iter()
+        .find_map(|path| fs::read(path).ok())
+        .map(|bytes| ("ChatSans".to_string(), bytes))
 }
 
 fn font_candidates() -> Vec<PathBuf> {
@@ -137,284 +471,26 @@ fn font_candidates() -> Vec<PathBuf> {
     paths
 }
 
-fn transcript_lines(document: &PdfTranscript<'_>) -> Vec<StyledLine> {
-    let mut lines = Vec::new();
-    push_wrapped(&mut lines, document.title, LineStyle::Title, 48, 0.0);
-    push_wrapped(
-        &mut lines,
-        &format!("Source: {}", document.source_type),
-        LineStyle::Metadata,
-        92,
-        12.0,
-    );
-    push_wrapped(
-        &mut lines,
-        &format!("Session: {}", document.session_id),
-        LineStyle::Metadata,
-        92,
-        2.0,
-    );
-    if let Some(model) = document.model {
-        push_wrapped(
-            &mut lines,
-            &format!("Model: {model}"),
-            LineStyle::Metadata,
-            92,
-            2.0,
-        );
-    }
-
-    for message in document.messages {
-        let style = if message.role == "user" {
-            LineStyle::User
-        } else {
-            LineStyle::Claude
-        };
-        let heading = match &message.timestamp {
-            Some(timestamp) => format!("{}  |  {timestamp}", message.role.to_uppercase()),
-            None => message.role.to_uppercase(),
-        };
-        push_wrapped(&mut lines, &heading, style, 82, 18.0);
-        if message.blocks.is_empty() {
-            push_paragraphs(&mut lines, &message.text, LineStyle::Body, 94, 7.0);
-        } else {
-            for block in &message.blocks {
-                push_block(&mut lines, block);
-            }
-        }
-    }
-    lines
-}
-
-fn push_block(lines: &mut Vec<StyledLine>, block: &ChatExportBlock) {
-    let text = block.text.as_deref().unwrap_or("").trim();
-    match block.kind.as_str() {
-        "text" => push_paragraphs(lines, text, LineStyle::Body, 94, 7.0),
-        "thinking" => {
-            push_wrapped(lines, "THINKING", LineStyle::Thinking, 90, 8.0);
-            push_paragraphs(lines, text, LineStyle::Thinking, 90, 4.0);
-        }
-        "tool_use" | "tool_result" => {
-            let label = format!(
-                "{}: {}{}",
-                if block.kind == "tool_use" {
-                    "TOOL"
-                } else {
-                    "TOOL RESULT"
-                },
-                block.tool_name.as_deref().unwrap_or("unknown"),
-                if block.is_error == Some(true) {
-                    " (error)"
-                } else {
-                    ""
-                }
-            );
-            push_wrapped(lines, &label, LineStyle::Tool, 86, 8.0);
-            if !text.is_empty() {
-                push_paragraphs(lines, text, LineStyle::Tool, 88, 4.0);
-            }
-            if let Some(input) = &block.tool_input {
-                push_paragraphs(lines, input, LineStyle::Tool, 88, 4.0);
-            }
-            if let Some(raw) = &block.raw {
-                push_paragraphs(lines, raw, LineStyle::Tool, 88, 4.0);
-            }
-        }
-        "attachment" | "file" => {
-            let label = block
-                .references
-                .first()
-                .and_then(|reference| reference.label.as_deref())
-                .unwrap_or(block.kind.as_str());
-            push_wrapped(
-                lines,
-                &format!("{}: {label}", block.kind.to_uppercase()),
-                LineStyle::Tool,
-                86,
-                8.0,
-            );
-        }
-        _ => {
-            push_wrapped(lines, &block.kind.to_uppercase(), LineStyle::Tool, 86, 8.0);
-            push_paragraphs(lines, text, LineStyle::Body, 94, 4.0);
-        }
-    }
-    for reference in &block.references {
-        let label = reference
-            .label
-            .as_deref()
-            .or(reference.url.as_deref())
-            .unwrap_or(&reference.kind);
-        let text = match &reference.url {
-            Some(url) if url != label => format!("- {label}: {url}"),
-            _ => format!("- {label}"),
-        };
-        push_wrapped(lines, &text, LineStyle::Reference, 88, 3.0);
-    }
-}
-
-fn push_paragraphs(
-    lines: &mut Vec<StyledLine>,
-    text: &str,
-    style: LineStyle,
-    width: usize,
-    first_space: f32,
-) {
-    let mut first = true;
-    for paragraph in text.lines() {
-        let spacing = if first { first_space } else { 3.0 };
-        if paragraph.trim().is_empty() {
-            lines.push(StyledLine {
-                text: String::new(),
-                style,
-                space_before: spacing,
-            });
-        } else {
-            push_wrapped(lines, paragraph, style, width, spacing);
-        }
-        first = false;
-    }
-}
-
-fn push_wrapped(
-    lines: &mut Vec<StyledLine>,
-    text: &str,
-    style: LineStyle,
-    width: usize,
-    first_space: f32,
-) {
-    for (index, line) in wrap_text(text, width).into_iter().enumerate() {
-        lines.push(StyledLine {
-            text: line,
-            style,
-            space_before: if index == 0 { first_space } else { 0.0 },
-        });
-    }
-}
-
-fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
-    let cleaned = text.replace('\t', "    ");
-    if cleaned.is_empty() {
-        return vec![String::new()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0;
-    for word in cleaned.split_whitespace() {
-        let word_width = display_width(word);
-        if word_width > max_width {
-            if !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
-            }
-            let mut chunk = String::new();
-            let mut chunk_width = 0;
-            for character in word.chars() {
-                let width = character_width(character);
-                if chunk_width + width > max_width && !chunk.is_empty() {
-                    lines.push(std::mem::take(&mut chunk));
-                    chunk_width = 0;
-                }
-                chunk.push(character);
-                chunk_width += width;
-            }
-            current = chunk;
-            current_width = chunk_width;
-            continue;
-        }
-        let separator = usize::from(!current.is_empty());
-        if current_width + separator + word_width > max_width {
-            lines.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        if !current.is_empty() {
-            current.push(' ');
-            current_width += 1;
-        }
-        current.push_str(word);
-        current_width += word_width;
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
-}
-
-fn display_width(text: &str) -> usize {
-    text.chars().map(character_width).sum()
-}
-
-fn character_width(character: char) -> usize {
-    if character.is_ascii() {
-        1
-    } else {
-        2
-    }
-}
-
-fn paginate(lines: &[StyledLine]) -> Vec<Vec<StyledLine>> {
-    let usable = PAGE_HEIGHT_PT - TOP - BOTTOM;
-    let mut pages = vec![Vec::new()];
-    let mut used = 0.0;
-    for line in lines {
-        let height = line_height(line.style) + line.space_before;
-        let keep_with_next = matches!(line.style, LineStyle::User | LineStyle::Claude);
-        let required = height + if keep_with_next { 18.0 } else { 0.0 };
-        if used + required > usable && !pages.last().is_some_and(Vec::is_empty) {
-            pages.push(Vec::new());
-            used = 0.0;
-        }
-        pages.last_mut().unwrap().push(line.clone());
-        used += height;
-    }
-    pages
-}
-
-fn render_page(
-    font: &PdfFontHandle,
-    title: &str,
-    lines: &[StyledLine],
-    page_number: usize,
-    total_pages: usize,
-) -> PdfPage {
-    let mut ops = Vec::new();
+fn add_footer(ops: &mut Vec<Op>, page_number: usize, total_pages: usize) {
+    let font = PdfFontHandle::Builtin(BuiltinFont::Helvetica);
     push_text_op(
-        &mut ops,
-        font,
-        "CLAUDE SESSION EXPORT",
-        8.0,
-        LEFT,
-        PAGE_HEIGHT_PT - 28.0,
-        rgb(0.43, 0.40, 0.35),
+        ops,
+        &font,
+        "Claude Session Exporter",
+        7.5,
+        FOOTER_LEFT,
+        FOOTER_Y,
+        rgb(0.20, 0.57, 0.49),
     );
-    if page_number > 1 {
-        let running_title = wrap_text(title, 74).into_iter().next().unwrap_or_default();
-        push_text_op(
-            &mut ops,
-            font,
-            &running_title,
-            8.0,
-            LEFT,
-            PAGE_HEIGHT_PT - 41.0,
-            rgb(0.25, 0.24, 0.22),
-        );
-    }
-    let mut y = PAGE_HEIGHT_PT - TOP;
-    for line in lines {
-        y -= line.space_before;
-        let (size, color, indent) = style_properties(line.style);
-        push_text_op(&mut ops, font, &line.text, size, LEFT + indent, y, color);
-        y -= line_height(line.style);
-    }
     push_text_op(
-        &mut ops,
-        font,
-        &format!("Page {page_number} of {total_pages}"),
+        ops,
+        &font,
+        &format!("{page_number} / {total_pages}"),
         8.0,
-        PAGE_WIDTH_PT - RIGHT - 62.0,
-        24.0,
-        rgb(0.43, 0.40, 0.35),
+        PAGE_WIDTH_PT - 73.0,
+        FOOTER_Y,
+        rgb(0.38, 0.36, 0.33),
     );
-    PdfPage::new(Mm(210.0), Mm(297.0), ops)
 }
 
 fn push_text_op(
@@ -426,9 +502,6 @@ fn push_text_op(
     y: f32,
     color: Color,
 ) {
-    // `SetTextCursor` serializes to a relative PDF text move. A fresh text
-    // section gives every line a stable page-relative origin instead of letting
-    // successive absolute-looking coordinates accumulate off the page.
     ops.push(Op::StartTextSection);
     ops.push(Op::SetTextCursor {
         pos: Point { x: Pt(x), y: Pt(y) },
@@ -444,29 +517,6 @@ fn push_text_op(
     ops.push(Op::EndTextSection);
 }
 
-fn style_properties(style: LineStyle) -> (f32, Color, f32) {
-    match style {
-        LineStyle::Title => (22.0, rgb(0.14, 0.13, 0.12), 0.0),
-        LineStyle::Metadata => (9.0, rgb(0.38, 0.36, 0.32), 0.0),
-        LineStyle::User => (11.0, rgb(0.60, 0.28, 0.12), 0.0),
-        LineStyle::Claude => (11.0, rgb(0.18, 0.43, 0.29), 0.0),
-        LineStyle::Body => (10.0, rgb(0.12, 0.12, 0.11), 0.0),
-        LineStyle::Thinking => (9.0, rgb(0.38, 0.36, 0.34), 12.0),
-        LineStyle::Tool => (8.5, rgb(0.35, 0.28, 0.20), 12.0),
-        LineStyle::Reference => (8.5, rgb(0.20, 0.35, 0.52), 12.0),
-    }
-}
-
-fn line_height(style: LineStyle) -> f32 {
-    match style {
-        LineStyle::Title => 27.0,
-        LineStyle::Metadata => 12.0,
-        LineStyle::User | LineStyle::Claude => 15.0,
-        LineStyle::Body => 14.0,
-        LineStyle::Thinking | LineStyle::Tool | LineStyle::Reference => 12.0,
-    }
-}
-
 fn rgb(r: f32, g: f32, b: f32) -> Color {
     Color::Rgb(Rgb {
         r,
@@ -478,7 +528,10 @@ fn rgb(r: f32, g: f32, b: f32) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_pdf, wrap_text, PdfTranscript};
+    use super::{
+        clean_display_title, escape_html, markdown_html, normalize_ordered_list_markers,
+        render_pdf, transcript_html, PdfTranscript,
+    };
     use crate::models::ChatExportMessage;
 
     fn fixture() -> (String, Vec<ChatExportMessage>) {
@@ -486,14 +539,13 @@ mod tests {
         let messages = vec![
             ChatExportMessage::plain(
                 "user",
-                "Please compare the two approaches and preserve a long identifier: 5121dabb-5e27-4f85-ad51-812569de176a. This paragraph tests wrapping without clipping at the right margin."
-                    .to_string(),
+                "Please compare **Access** and **SQL**, then preserve `order_id`.".to_string(),
                 Some("2026-08-12 12:00".to_string()),
             ),
             ChatExportMessage::plain(
                 "claude",
-                "The PDF export is generated locally.\n\nIt supports multiple paragraphs, automatic page breaks, accented text such as café and résumé, and stable page numbering."
-                    .repeat(18),
+                "## Recommendation\n\nUse SQL for the shared system.\n\n1. Better concurrency\n2. Central backups\n\n```sql\nSELECT order_id FROM orders;\n```\n\nThe longer explanation should wrap naturally without clipping at the right margin.\n\n"
+                    .repeat(9),
                 None,
             ),
         ];
@@ -501,12 +553,51 @@ mod tests {
     }
 
     #[test]
-    fn wraps_long_unbroken_tokens() {
-        let wrapped = wrap_text(&"x".repeat(25), 10);
+    fn escapes_cover_metadata() {
+        assert_eq!(escape_html("A & <B>"), "A &amp; &lt;B&gt;");
+    }
+
+    #[test]
+    fn removes_markdown_markers_from_cover_title() {
         assert_eq!(
-            wrapped.iter().map(String::len).collect::<Vec<_>>(),
-            [10, 10, 5]
+            clean_display_title("***MSAccess audit***"),
+            "MSAccess audit"
         );
+    }
+
+    #[test]
+    fn renders_markdown_hierarchy() {
+        let html = markdown_html("## Heading\n\n**Bold** and `code`\n\n- one");
+        assert!(html.contains("<h2>Heading</h2>"));
+        assert!(html.contains("<strong>Bold</strong>"));
+        assert!(html.contains("<code>code</code>"));
+        assert!(html.contains("<li>one</li>"));
+    }
+
+    #[test]
+    fn preserves_ordered_numbers_without_html_list_counters() {
+        let normalized = normalize_ordered_list_markers("1. First\n2. Second");
+        assert_eq!(normalized, "**1.** First\n\n**2.** Second\n\n");
+        let html = markdown_html("1. First\n2. Second");
+        assert!(!html.contains("<ol>"));
+        assert!(html.contains("<strong>1.</strong> First"));
+        assert!(html.contains("<strong>2.</strong> Second"));
+    }
+
+    #[test]
+    fn keeps_a_dedicated_cover_before_messages() {
+        let (title, messages) = fixture();
+        let html = transcript_html(&PdfTranscript {
+            title: &title,
+            source_type: "Claude Desktop Cowork",
+            session_id: "fixture-session",
+            model: Some("claude-fable-5"),
+            messages: &messages,
+        });
+        assert!(
+            html.find("class=\"cover\"").unwrap() < html.find("class=\"conversation\"").unwrap()
+        );
+        assert!(html.contains("page-break-after: always"));
     }
 
     #[test]
@@ -539,5 +630,31 @@ mod tests {
         })
         .unwrap();
         std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    #[ignore = "renders a previously exported JSON transcript for visual QA"]
+    fn writes_json_visual_fixture() {
+        let source = std::env::var("CSE_PDF_JSON_FIXTURE")
+            .expect("set CSE_PDF_JSON_FIXTURE to an exported transcript JSON");
+        let output =
+            std::env::var("CSE_PDF_FIXTURE_PATH").expect("set CSE_PDF_FIXTURE_PATH for visual QA");
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(source).unwrap()).unwrap();
+        let messages: Vec<ChatExportMessage> =
+            serde_json::from_value(value["messages"].clone()).unwrap();
+        let title = value["title"].as_str().unwrap_or("Claude Session");
+        let source_type = value["source_type"].as_str().unwrap_or("Claude");
+        let session_id = value["session_id"].as_str().unwrap_or("unknown");
+        let model = value["model"].as_str();
+        let (bytes, _) = render_pdf(&PdfTranscript {
+            title,
+            source_type,
+            session_id,
+            model,
+            messages: &messages,
+        })
+        .unwrap();
+        std::fs::write(output, bytes).unwrap();
     }
 }

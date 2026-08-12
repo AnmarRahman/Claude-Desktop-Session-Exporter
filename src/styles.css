@@ -358,6 +358,69 @@ dd {
   padding: 8px 10px;
 }
 
+.export-format-options {
+  background: #f8f6f1;
+  border: 1px solid #e3ddd3;
+  border-radius: 8px;
+  margin-top: 18px;
+  padding: 13px 14px;
+}
+
+.export-format-options > div:first-child {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.export-format-options .muted {
+  font-size: 12px;
+}
+
+.format-grid {
+  display: grid;
+  gap: 9px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 11px;
+}
+
+.format-option {
+  align-items: flex-start;
+  background: #ffffff;
+  border: 1px solid #ded8ce;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.format-option.selected {
+  background: #f0f7f2;
+  border-color: #90bea0;
+}
+
+.format-option input {
+  flex: none;
+  margin: 3px 0 0;
+}
+
+.format-option span,
+.format-option small {
+  display: block;
+}
+
+.format-option strong {
+  font-size: 13px;
+}
+
+.format-option small {
+  font-size: 11px;
+  line-height: 1.35;
+  margin-top: 2px;
+}
+
 .export-directory {
   align-items: center;
   background: #f8f6f1;

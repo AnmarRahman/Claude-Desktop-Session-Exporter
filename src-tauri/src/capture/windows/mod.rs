@@ -164,14 +164,14 @@ impl CaptureAdapter for WindowsCaptureAdapter {
                 return transcript::export_session(
                     transcript::SessionStore::Cowork,
                     options.conversation_id.as_deref(),
-                    options.output_directory.as_deref(),
+                    &options,
                 )
             }
             "code" => {
                 return transcript::export_session(
                     transcript::SessionStore::ClaudeCode,
                     options.conversation_id.as_deref(),
-                    options.output_directory.as_deref(),
+                    &options,
                 )
             }
             // Identical routing to macOS, by construction.
@@ -180,14 +180,11 @@ impl CaptureAdapter for WindowsCaptureAdapter {
                     web_cache::export_web_conversation(&options)
                 }
                 crate::capture::AutoPlan::LocalStoreOnly(store) => {
-                    transcript::export_latest_session(store, options.output_directory.as_deref())
+                    transcript::export_latest_session(store, &options)
                 }
                 crate::capture::AutoPlan::WebCacheThenAnyLocal => {
                     web_cache::export_web_conversation(&options).or_else(|_| {
-                        transcript::export_latest_session(
-                            transcript::SessionStore::Any,
-                            options.output_directory.as_deref(),
-                        )
+                        transcript::export_latest_session(transcript::SessionStore::Any, &options)
                     })
                 }
             },

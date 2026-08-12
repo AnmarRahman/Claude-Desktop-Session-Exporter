@@ -14,7 +14,7 @@ Implemented:
 - a unified searchable picker for cached Home, Cowork, and Claude Code sessions
 - normalization into ordered blocks: text, thinking, tool use, tool results,
   attachments, files
-- Markdown, JSON, and native paginated PDF export
+- Markdown, JSON, and polished paginated PDF export with a cover page, conversation styling, rendered Markdown, tables, and code/activity panels
 
 Still to come:
 

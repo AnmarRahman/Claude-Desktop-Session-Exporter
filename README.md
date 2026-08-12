@@ -23,7 +23,7 @@ Open Claude Session Exporter
 Export the session
 ```
 
-That produces Markdown, JSON, and PDF files in the extraction directory selected in the app. Without a custom selection, the app uses its local `exports/` directory. HTML preview is a later phase.
+Choose Markdown, JSON, PDF, or any combination of those formats before exporting. The selected files are written to the extraction directory configured in the app; without a custom directory, the app uses its local `exports/` folder. HTML preview is a later phase.
 
 ## Features Implemented So Far
 
@@ -34,7 +34,7 @@ That produces Markdown, JSON, and PDF files in the extraction directory selected
 - Unified, searchable Home, Cowork, and Claude Code picker and exact-session export, independent of whether Claude Desktop is running.
 - Active conversation matching from Claude's Session Storage chat-drawer snapshots, with macOS window-title matching as a fallback.
 - Cowork diagnostics for roots, record counts, matches, missing transcripts, duplicates, and selected-session paths/metadata.
-- Markdown, JSON, and native A4 PDF output, with optional thinking blocks and optional tool activity.
+- Selectable Markdown, JSON, and polished A4 PDF output (one, two, or all three), with a dedicated PDF cover, conversation-style user/Claude layout, rendered Markdown, tables, code panels, optional thinking blocks, and optional tool activity.
 - Persistent extraction-directory picker, default-folder reset, and one-click opening in Finder or File Explorer.
 - Source selector: Auto, Home / Cowork, Claude Code — where Auto refuses to fall back to a stale Claude Code session while Claude Desktop is showing Home/Chat.
 - Windows-native capture boundary written in Rust.
@@ -223,7 +223,7 @@ Edit the constants near the top of that file to change the mark, then re-run it.
 1. Add a picker for choosing which cached conversation to export.
 2. Confirm the Windows cache backend on a real install, and re-validate the whole Windows runtime path after the shared-reader refactor.
 3. Implement Claude Desktop detection on macOS, and port Claude Code export to macOS.
-4. Add HTML preview and richer PDF styling for images and tables.
+4. Add HTML preview and inline image rendering in PDF exports.
 5. Add image capture for content the payload only references.
 6. Present Cowork activity cards distinctly rather than as generic tool blocks.
 7. Package polished Windows and macOS builds.

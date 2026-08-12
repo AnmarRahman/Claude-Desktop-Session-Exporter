@@ -23,8 +23,9 @@ thiserror = "2.0"
 brotli = "7"
 flate2 = "1"
 ruzstd = "0.7"
-printpdf = { version = "0.12.4", default-features = false }
+printpdf = { version = "0.12.4", features = ["html"] }
 tauri-plugin-dialog = "2"
+pulldown-cmark = "0.13"
 
 [target.'cfg(windows)'.dependencies]
 sysinfo = "0.37"

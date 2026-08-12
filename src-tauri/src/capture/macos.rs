@@ -222,14 +222,14 @@ impl CaptureAdapter for MacOsCaptureAdapter {
                 return transcript::export_session(
                     transcript::SessionStore::Cowork,
                     options.conversation_id.as_deref(),
-                    options.output_directory.as_deref(),
+                    &options,
                 )
             }
             "code" => {
                 return transcript::export_session(
                     transcript::SessionStore::ClaudeCode,
                     options.conversation_id.as_deref(),
-                    options.output_directory.as_deref(),
+                    &options,
                 )
             }
             _ => {}
@@ -242,14 +242,11 @@ impl CaptureAdapter for MacOsCaptureAdapter {
         let mut result = match crate::capture::auto_plan(shell_mode.as_ref()) {
             crate::capture::AutoPlan::WebCacheOnly => web_cache::export_web_conversation(&options)?,
             crate::capture::AutoPlan::LocalStoreOnly(store) => {
-                transcript::export_latest_session(store, options.output_directory.as_deref())?
+                transcript::export_latest_session(store, &options)?
             }
             crate::capture::AutoPlan::WebCacheThenAnyLocal => {
                 web_cache::export_web_conversation(&options).or_else(|_| {
-                    transcript::export_latest_session(
-                        transcript::SessionStore::Any,
-                        options.output_directory.as_deref(),
-                    )
+                    transcript::export_latest_session(transcript::SessionStore::Any, &options)
                 })?
             }
         };

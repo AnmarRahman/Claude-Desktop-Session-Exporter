@@ -186,7 +186,7 @@ pub struct VisibleContentCapture {
 }
 
 /// A citation or file a block points at, when the content itself is not text.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatExportReference {
     pub kind: String,
     pub label: Option<String>,
@@ -197,7 +197,7 @@ pub struct ChatExportReference {
 ///
 /// Extraction and rendering stay separate, so an unrecognized block is kept with
 /// a descriptive `kind` rather than dropped.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatExportBlock {
     pub kind: String,
     pub text: Option<String>,
@@ -231,7 +231,7 @@ impl ChatExportBlock {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatExportMessage {
     pub role: String,
     /// The message's prose, excluding thinking and tool activity.
@@ -260,9 +260,9 @@ pub struct ChatExportResult {
     pub session_id: String,
     pub source_type: String,
     pub source_path: String,
-    pub markdown_path: String,
-    pub json_path: String,
-    pub pdf_path: String,
+    pub markdown_path: Option<String>,
+    pub json_path: Option<String>,
+    pub pdf_path: Option<String>,
     pub output_directory: String,
     pub message_count: usize,
     pub warnings: Vec<String>,
@@ -282,4 +282,10 @@ pub struct ChatExportOptions {
     pub include_tools: Option<bool>,
     /// Absolute directory selected by the user. Uses `./exports` when absent.
     pub output_directory: Option<String>,
+    /// Write a Markdown transcript. On when omitted for backward compatibility.
+    pub export_markdown: Option<bool>,
+    /// Write the normalized JSON archive. On when omitted for backward compatibility.
+    pub export_json: Option<bool>,
+    /// Write the formatted PDF transcript. On when omitted for backward compatibility.
+    pub export_pdf: Option<bool>,
 }

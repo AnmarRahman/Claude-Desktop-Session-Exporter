@@ -195,9 +195,9 @@ export interface ChatExportResult {
   session_id: string;
   source_type: string;
   source_path: string;
-  markdown_path: string;
-  json_path: string;
-  pdf_path: string;
+  markdown_path: string | null;
+  json_path: string | null;
+  pdf_path: string | null;
   output_directory: string;
   message_count: number;
   warnings: string[];
@@ -213,4 +213,10 @@ export interface ChatExportOptions {
   include_tools?: boolean;
   /** Absolute directory selected by the user. Uses the app's default exports folder when absent. */
   output_directory?: string;
+  /** Write a Markdown transcript. Defaults to true. */
+  export_markdown?: boolean;
+  /** Write the normalized JSON archive. Defaults to true. */
+  export_json?: boolean;
+  /** Write the formatted PDF transcript. Defaults to true. */
+  export_pdf?: boolean;
 }
