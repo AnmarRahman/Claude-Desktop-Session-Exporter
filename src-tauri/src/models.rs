@@ -34,6 +34,67 @@ pub struct SessionMetadata {
     pub session_type: String,
 }
 
+/// One locally extractable conversation. The source classification comes from
+/// the storage layout and exact metadata correlation, rather than from title or
+/// working-directory heuristics.
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalSessionSummary {
+    pub cli_session_id: String,
+    pub desktop_session_id: Option<String>,
+    pub title: String,
+    pub source_type: String,
+    pub transcript_available: bool,
+    pub transcript_path: Option<String>,
+    pub metadata_path: Option<String>,
+    /// Filesystem mtime of Desktop metadata. Claude rewrites Cowork metadata
+    /// when a session is focused even when `lastFocusedAt` is absent.
+    pub metadata_modified_at: Option<u64>,
+    pub cwd: Option<String>,
+    pub origin_cwd: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub created_at: Option<u64>,
+    pub last_activity_at: Option<u64>,
+    pub last_focused_at: Option<u64>,
+    pub is_archived: Option<bool>,
+    pub title_source: Option<String>,
+    pub permission_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CoworkDiscoveryDiagnostics {
+    pub metadata_root: String,
+    pub metadata_root_found: bool,
+    pub agent_metadata_root: String,
+    pub agent_metadata_root_found: bool,
+    pub agent_metadata_records_discovered: usize,
+    pub nested_cowork_transcripts_discovered: usize,
+    pub metadata_records_discovered: usize,
+    pub malformed_metadata_files: usize,
+    pub metadata_without_cli_session_id: usize,
+    pub duplicate_metadata_records: usize,
+    pub claude_projects_root: String,
+    pub claude_projects_root_found: bool,
+    pub jsonl_transcripts_discovered: usize,
+    pub duplicate_transcript_ids: usize,
+    pub cowork_matches: usize,
+    pub unmatched_cowork_metadata: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalSessionDiscovery {
+    /// Extractable sessions. The Tauri command adds cached Home conversations
+    /// to the deduplicated Cowork and Claude Code discovery returned by Rust.
+    pub sessions: Vec<LocalSessionSummary>,
+    /// Valid Desktop metadata whose JSONL transcript is no longer available.
+    pub unmatched_metadata: Vec<LocalSessionSummary>,
+    /// Canonical picker ID resolved from Claude's most recent drawer snapshot.
+    pub active_session_id: Option<String>,
+    pub active_session_signal: Option<String>,
+    pub diagnostics: CoworkDiscoveryDiagnostics,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AccessibilityNode {
     pub id: usize,
@@ -201,6 +262,8 @@ pub struct ChatExportResult {
     pub source_path: String,
     pub markdown_path: String,
     pub json_path: String,
+    pub pdf_path: String,
+    pub output_directory: String,
     pub message_count: usize,
     pub warnings: Vec<String>,
 }
@@ -208,12 +271,15 @@ pub struct ChatExportResult {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChatExportOptions {
-    /// "auto" | "home" | "code".
+    /// "auto" | "home" | "cowork" | "code".
     pub source: Option<String>,
-    /// Export this Home/Cowork conversation instead of the most recent one.
+    /// Export this Home conversation UUID or local JSONL cliSessionId instead
+    /// of the most recent session in the selected source.
     pub conversation_id: Option<String>,
     /// Include Claude's thinking blocks. Off unless requested.
     pub include_thinking: Option<bool>,
     /// Include tool and Cowork activity. On unless disabled.
     pub include_tools: Option<bool>,
+    /// Absolute directory selected by the user. Uses `./exports` when absent.
+    pub output_directory: Option<String>,
 }

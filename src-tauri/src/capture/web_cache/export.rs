@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::capture::output::prepare_export_directory;
+use crate::capture::pdf::{self, PdfTranscript};
 use crate::capture::CaptureError;
 use crate::filename::sanitize_filename_part;
 use crate::models::{ChatExportBlock, ChatExportMessage, ChatExportResult};
@@ -27,19 +29,24 @@ pub struct ExportDocument {
 pub fn write_export(
     document: &ExportDocument,
     warnings: Vec<String>,
+    output_directory: Option<&str>,
 ) -> Result<ChatExportResult, CaptureError> {
-    let exports_dir = std::env::current_dir()
-        .map_err(|error| CaptureError::Diagnostic(error.to_string()))?
-        .join("exports");
-    fs::create_dir_all(&exports_dir)
-        .map_err(|error| CaptureError::Diagnostic(error.to_string()))?;
+    let exports_dir = prepare_export_directory(output_directory)?;
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| CaptureError::Diagnostic(error.to_string()))?
         .as_secs();
     let title = sanitize_filename_part(&document.title, "Claude Session");
-    let (markdown_path, json_path) = reserve_export_paths(&exports_dir, &title, timestamp)?;
+    let (pdf_bytes, pdf_warnings) = pdf::render_pdf(&PdfTranscript {
+        title: &document.title,
+        source_type: &document.source_type,
+        session_id: &document.session_id,
+        model: document.model.as_deref(),
+        messages: &document.messages,
+    })?;
+    let (markdown_path, json_path, pdf_path) =
+        reserve_export_paths(&exports_dir, &title, timestamp)?;
 
     let json = serde_json::to_string_pretty(document)
         .map_err(|error| CaptureError::Diagnostic(error.to_string()))?;
@@ -47,12 +54,17 @@ pub fn write_export(
     // Both files describe one export, so a half-written pair is worse than no
     // export. If either write fails, neither file is left behind.
     let written = fs::write(&json_path, json)
-        .and_then(|()| fs::write(&markdown_path, render_markdown(document)));
+        .and_then(|()| fs::write(&markdown_path, render_markdown(document)))
+        .and_then(|()| fs::write(&pdf_path, pdf_bytes));
     if let Err(error) = written {
         let _ = fs::remove_file(&json_path);
         let _ = fs::remove_file(&markdown_path);
+        let _ = fs::remove_file(&pdf_path);
         return Err(CaptureError::Diagnostic(error.to_string()));
     }
+
+    let mut warnings = warnings;
+    warnings.extend(pdf_warnings);
 
     Ok(ChatExportResult {
         title: document.title.clone(),
@@ -61,6 +73,8 @@ pub fn write_export(
         source_path: document.source_path.clone(),
         markdown_path: path_string(markdown_path),
         json_path: path_string(json_path),
+        pdf_path: path_string(pdf_path),
+        output_directory: path_string(exports_dir),
         message_count: document.messages.len(),
         warnings,
     })
@@ -76,7 +90,7 @@ fn reserve_export_paths(
     exports_dir: &Path,
     title: &str,
     timestamp: u64,
-) -> Result<(PathBuf, PathBuf), CaptureError> {
+) -> Result<(PathBuf, PathBuf, PathBuf), CaptureError> {
     const MAX_ATTEMPTS: u32 = 100;
 
     for attempt in 0..MAX_ATTEMPTS {
@@ -86,6 +100,7 @@ fn reserve_export_paths(
         };
         let markdown_path = exports_dir.join(format!("{basename}.md"));
         let json_path = exports_dir.join(format!("{basename}.json"));
+        let pdf_path = exports_dir.join(format!("{basename}.pdf"));
 
         match fs::OpenOptions::new()
             .write(true)
@@ -94,11 +109,11 @@ fn reserve_export_paths(
         {
             // The pair must be free together. Release the reservation before
             // moving on, or a JSON-only collision leaves an empty .md behind.
-            Ok(_) if json_path.exists() => {
+            Ok(_) if json_path.exists() || pdf_path.exists() => {
                 let _ = fs::remove_file(&markdown_path);
                 continue;
             }
-            Ok(_) => return Ok((markdown_path, json_path)),
+            Ok(_) => return Ok((markdown_path, json_path, pdf_path)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(CaptureError::Diagnostic(error.to_string())),
         }
@@ -141,7 +156,11 @@ pub fn render_markdown(document: &ExportDocument) -> String {
     markdown.push('\n');
 
     for message in &document.messages {
-        let heading = if message.role == "user" { "User" } else { "Claude" };
+        let heading = if message.role == "user" {
+            "User"
+        } else {
+            "Claude"
+        };
         match &message.timestamp {
             Some(timestamp) => markdown.push_str(&format!("## {heading} ({timestamp})\n\n")),
             None => markdown.push_str(&format!("## {heading}\n\n")),
@@ -161,7 +180,10 @@ fn render_block(block: &ChatExportBlock) -> String {
         "text" => format!("{text}\n\n"),
         "thinking" => format!("> **Thinking**\n{}\n\n", blockquote(text)),
         "tool_use" => {
-            let mut section = format!("**Tool — {}**\n\n", block.tool_name.as_deref().unwrap_or("unknown"));
+            let mut section = format!(
+                "**Tool — {}**\n\n",
+                block.tool_name.as_deref().unwrap_or("unknown")
+            );
             if !text.is_empty() {
                 section.push_str(&format!("_{text}_\n\n"));
             }
@@ -171,7 +193,11 @@ fn render_block(block: &ChatExportBlock) -> String {
             section
         }
         "tool_result" => {
-            let status = if block.is_error == Some(true) { " (error)" } else { "" };
+            let status = if block.is_error == Some(true) {
+                " (error)"
+            } else {
+                ""
+            };
             let mut section = format!(
                 "**Tool result — {}{status}**\n\n",
                 block.tool_name.as_deref().unwrap_or("unknown")
@@ -269,7 +295,7 @@ mod tests {
         ExportDocument {
             title: "Test | Session".to_string(),
             session_id: "conv-1".to_string(),
-            source_type: "Claude Home/Cowork web cache".to_string(),
+            source_type: "Claude Home web cache".to_string(),
             source_path: "/tmp/entry_0".to_string(),
             model: Some("claude-opus-5".to_string()),
             summary: None,
@@ -287,11 +313,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let (first_md, first_json) = reserve_export_paths(&dir, "Chat", 1786455779).unwrap();
-        let (second_md, second_json) = reserve_export_paths(&dir, "Chat", 1786455779).unwrap();
+        let (first_md, first_json, first_pdf) =
+            reserve_export_paths(&dir, "Chat", 1786455779).unwrap();
+        let (second_md, second_json, second_pdf) =
+            reserve_export_paths(&dir, "Chat", 1786455779).unwrap();
 
         assert_ne!(first_md, second_md);
         assert_ne!(first_json, second_json);
+        assert_ne!(first_pdf, second_pdf);
         assert!(first_md.exists(), "basename should be reserved on disk");
         assert!(second_md.to_string_lossy().contains("-2."));
     }
@@ -304,7 +333,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Chat-1786455779.json"), b"{}").unwrap();
 
-        let (markdown_path, _) = reserve_export_paths(&dir, "Chat", 1786455779).unwrap();
+        let (markdown_path, _, _) = reserve_export_paths(&dir, "Chat", 1786455779).unwrap();
 
         assert!(markdown_path.to_string_lossy().contains("-2."));
         let orphans: Vec<_> = std::fs::read_dir(&dir)
@@ -331,6 +360,33 @@ mod tests {
         ]));
         assert!(markdown.contains("## User (t1)\n\nHello\n"));
         assert!(markdown.contains("## Claude\n\nHi there\n"));
+    }
+
+    #[test]
+    fn writes_all_formats_to_the_selected_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "cse-selected-export-directory-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let export = write_export(
+            &document(vec![ChatExportMessage::plain(
+                "user",
+                "Store this in my chosen folder.".to_string(),
+                None,
+            )]),
+            vec![],
+            dir.to_str(),
+        )
+        .unwrap();
+
+        assert_eq!(export.output_directory, dir.display().to_string());
+        for path in [&export.markdown_path, &export.json_path, &export.pdf_path] {
+            assert_eq!(std::path::Path::new(path).parent(), Some(dir.as_path()));
+            assert!(std::path::Path::new(path).is_file());
+        }
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

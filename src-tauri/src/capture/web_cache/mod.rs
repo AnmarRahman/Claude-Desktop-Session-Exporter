@@ -1,4 +1,4 @@
-//! Reads regular Claude Home/Cowork conversations out of Claude Desktop's local
+//! Reads regular Claude Home conversations out of Claude Desktop's local
 //! Chromium profile.
 //!
 //! Claude Desktop fetches a conversation over
@@ -20,17 +20,21 @@ mod conversation;
 mod decode;
 mod export;
 pub(crate) mod paths;
-mod simple_cache;
+mod session_state;
 mod shell_mode;
+mod simple_cache;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use crate::capture::CaptureError;
-use crate::models::{ChatExportOptions, ChatExportResult};
+use crate::models::{ChatExportOptions, ChatExportResult, LocalSessionSummary};
+
+pub const SOURCE_HOME: &str = "Claude Home Chat";
 
 pub use conversation::Conversation;
+pub use session_state::latest_active_drawer_session;
 pub use shell_mode::{latest_shell_mode, ShellMode};
 
 /// How many stored versions of one conversation to try before giving up.
@@ -59,6 +63,7 @@ impl CachedConversationRef {
 #[derive(Debug, Clone)]
 pub struct LatestSessionMetadata {
     pub title: Option<String>,
+    pub observed_at_unix_ms: u64,
 }
 
 /// One entry per conversation, most recently written first.
@@ -68,14 +73,85 @@ pub struct LatestSessionMetadata {
 ///
 /// Export deliberately does not use this — it needs every stored version of one
 /// conversation, not one entry per conversation. This is the listing a
-/// conversation picker needs, and is currently exercised only by the manual
-/// real-profile test.
+/// conversation picker needs.
 #[allow(dead_code)]
 pub fn list_cached_conversations() -> Vec<CachedConversationRef> {
     let mut conversations = list_cache_entries();
     let mut seen = std::collections::HashSet::new();
     conversations.retain(|candidate| seen.insert(candidate.uuid.clone()));
     conversations
+}
+
+/// Every readable Home conversation currently retained by Claude Desktop's
+/// cache, one row per conversation UUID. This is best-effort because Chromium
+/// may evict old responses; only device-local cached conversations are listed.
+pub fn list_home_sessions() -> Vec<LocalSessionSummary> {
+    let entries = list_cache_entries();
+    let mut seen = std::collections::HashSet::new();
+    let newest: Vec<&CachedConversationRef> = entries
+        .iter()
+        .filter(|entry| entry.is_usable() && seen.insert(entry.uuid.clone()))
+        .collect();
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4)
+        .clamp(1, 8);
+    let chunk_size = newest.len().div_ceil(workers).max(1);
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = newest
+            .chunks(chunk_size)
+            .map(|chunk| {
+                let entries = &entries;
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|newest| home_summary(newest, entries))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap_or_else(|_| Vec::new()))
+            .collect()
+    })
+}
+
+fn home_summary(
+    newest: &CachedConversationRef,
+    entries: &[CachedConversationRef],
+) -> Option<LocalSessionSummary> {
+    let conversation = entries
+        .iter()
+        .filter(|entry| entry.uuid == newest.uuid && entry.is_usable())
+        .take(MAX_VERSIONS_PER_CONVERSATION)
+        .find_map(|entry| load_expected_conversation(entry).ok())?;
+    let title = conversation
+        .display_title()
+        .unwrap_or_else(|| conversation.uuid.clone());
+    Some(LocalSessionSummary {
+        // Kept as the canonical local ID for compatibility with the JSONL
+        // session picker. Home export interprets it as a conversation UUID.
+        cli_session_id: conversation.uuid,
+        desktop_session_id: None,
+        title,
+        source_type: SOURCE_HOME.to_string(),
+        transcript_available: true,
+        transcript_path: Some(newest.entry_path.display().to_string()),
+        metadata_path: None,
+        metadata_modified_at: None,
+        cwd: None,
+        origin_cwd: None,
+        model: conversation.model,
+        effort: None,
+        created_at: None,
+        last_activity_at: Some(newest.modified_unix_ms as u64),
+        last_focused_at: Some(newest.modified_unix_ms as u64),
+        is_archived: None,
+        title_source: Some("Claude Desktop HTTP cache".to_string()),
+        permission_mode: None,
+    })
 }
 
 /// Every cache entry, most recently written first.
@@ -256,7 +332,7 @@ pub fn export_web_conversation(
     // a 404 behind, and it must not mask the conversations that do exist.
     let Some(newest) = entries.iter().find(|entry| entry.is_usable()) else {
         return Err(CaptureError::Diagnostic(format!(
-            "Every cached Claude Home/Cowork entry is an error response, so there is nothing to export. Open the chat in Claude Desktop, wait for it to load, then retry. Checked: {}",
+            "Every cached Claude Home entry is an error response, so there is nothing to export. Open the chat in Claude Desktop, wait for it to load, then retry. Checked: {}",
             paths::describe_searched_locations()
         )));
     };
@@ -312,7 +388,7 @@ pub fn export_web_conversation(
         let document = export::ExportDocument {
             title,
             session_id: conversation.uuid.clone(),
-            source_type: "Claude Home/Cowork web cache".to_string(),
+            source_type: "Claude Home web cache".to_string(),
             source_path: candidate.entry_path.display().to_string(),
             model: conversation.model.clone(),
             summary: conversation.summary.clone(),
@@ -340,7 +416,7 @@ pub fn export_web_conversation(
             ));
         }
 
-        return export::write_export(&document, warnings);
+        return export::write_export(&document, warnings, options.output_directory.as_deref());
     }
 
     Err(CaptureError::Diagnostic(format!(
@@ -352,7 +428,7 @@ pub fn export_web_conversation(
 
 fn no_conversations_message() -> String {
     format!(
-        "No regular Claude Home/Cowork chat transcript was found in Claude Desktop's local cache. Open the chat in Claude Desktop, wait for it to load, then retry. Checked: {}",
+        "No regular Claude Home chat transcript was found in Claude Desktop's local cache. Open the chat in Claude Desktop, wait for it to load, then retry. Checked: {}",
         paths::describe_searched_locations()
     )
 }
@@ -374,7 +450,7 @@ fn title_from_first_user_message(messages: &[crate::models::ChatExportMessage]) 
 /// Metadata for the most recently cached conversation that actually decodes.
 ///
 /// Returns `None` when nothing decodes, because callers read `Some` as proof
-/// that a Home/Cowork chat is the active session. A cached 404 or a half-written
+/// that a Home chat is the active session. A cached 404 or a half-written
 /// entry as the newest candidate must not answer that question.
 ///
 /// Memoized on the newest entry's path and mtime: decoding a long conversation
@@ -403,6 +479,7 @@ pub fn latest_session_metadata() -> Option<LatestSessionMetadata> {
         .find_map(|candidate| load_expected_conversation(candidate).ok())
         .map(|conversation| LatestSessionMetadata {
             title: conversation.display_title(),
+            observed_at_unix_ms: newest.modified_unix_ms as u64,
         });
     *memo = Some((
         newest.entry_path.clone(),
@@ -491,7 +568,8 @@ mod tests {
 
     #[test]
     fn ignores_sub_resources_and_list_endpoints() {
-        let sub = format!("1/0/https://claude.ai/api/organizations/org/chat_conversations/{UUID}/title");
+        let sub =
+            format!("1/0/https://claude.ai/api/organizations/org/chat_conversations/{UUID}/title");
         assert_eq!(conversation_uuid_from_key(&sub), None);
         assert_eq!(
             conversation_uuid_from_key(
@@ -507,6 +585,21 @@ mod tests {
     /// ```text
     /// cargo test -- --ignored --nocapture real_profile
     /// ```
+    #[test]
+    #[ignore = "requires a local Claude Desktop profile with a cached Home chat"]
+    fn lists_home_sessions_from_the_real_profile() {
+        let sessions = super::list_home_sessions();
+        assert!(!sessions.is_empty(), "no cached Home conversations found");
+        assert!(sessions
+            .iter()
+            .all(|session| session.source_type == super::SOURCE_HOME));
+        let unique: std::collections::HashSet<_> = sessions
+            .iter()
+            .map(|session| &session.cli_session_id)
+            .collect();
+        assert_eq!(unique.len(), sessions.len());
+    }
+
     #[test]
     #[ignore = "requires a local Claude Desktop profile with a cached Home chat"]
     fn exports_a_conversation_from_the_real_profile() {

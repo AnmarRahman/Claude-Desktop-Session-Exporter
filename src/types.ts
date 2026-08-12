@@ -1,4 +1,6 @@
-export type SessionType = "chat" | "cowork" | "unknown";
+/** Mirrors `session_type` in the Rust `SessionMetadata`. Cowork and Claude Code
+ *  are separate products backed by separate stores, so they are separate types. */
+export type SessionType = "chat" | "cowork" | "code" | "unknown";
 
 export interface DetectedProcess {
   pid: number;
@@ -28,6 +30,57 @@ export interface ClaudeDetection {
 export interface SessionMetadata {
   title?: string;
   session_type: SessionType;
+}
+
+export type LocalSessionSource = "Claude Home Chat" | "Claude Code" | "Claude Desktop Cowork" | string;
+
+export interface LocalSessionSummary {
+  cli_session_id: string;
+  desktop_session_id?: string;
+  title: string;
+  source_type: LocalSessionSource;
+  transcript_available: boolean;
+  transcript_path?: string;
+  metadata_path?: string;
+  metadata_modified_at?: number;
+  cwd?: string;
+  origin_cwd?: string;
+  model?: string;
+  effort?: string;
+  created_at?: number;
+  last_activity_at?: number;
+  last_focused_at?: number;
+  is_archived?: boolean;
+  title_source?: string;
+  permission_mode?: string;
+}
+
+export interface CoworkDiscoveryDiagnostics {
+  metadata_root: string;
+  metadata_root_found: boolean;
+  agent_metadata_root: string;
+  agent_metadata_root_found: boolean;
+  agent_metadata_records_discovered: number;
+  nested_cowork_transcripts_discovered: number;
+  metadata_records_discovered: number;
+  malformed_metadata_files: number;
+  metadata_without_cli_session_id: number;
+  duplicate_metadata_records: number;
+  claude_projects_root: string;
+  claude_projects_root_found: boolean;
+  jsonl_transcripts_discovered: number;
+  duplicate_transcript_ids: number;
+  cowork_matches: number;
+  unmatched_cowork_metadata: number;
+  warnings: string[];
+}
+
+export interface LocalSessionDiscovery {
+  sessions: LocalSessionSummary[];
+  unmatched_metadata: LocalSessionSummary[];
+  active_session_id?: string;
+  active_session_signal?: string;
+  diagnostics: CoworkDiscoveryDiagnostics;
 }
 
 export interface AccessibilityNode {
@@ -144,16 +197,20 @@ export interface ChatExportResult {
   source_path: string;
   markdown_path: string;
   json_path: string;
+  pdf_path: string;
+  output_directory: string;
   message_count: number;
   warnings: string[];
 }
 
 export interface ChatExportOptions {
   source?: "auto" | "home" | "cowork" | "code" | string;
-  /** Export this Home/Cowork conversation instead of the most recent one. */
+  /** Export this Home conversation or local JSONL session instead of the newest one. */
   conversation_id?: string;
   /** Include Claude's thinking blocks. Off unless requested. */
   include_thinking?: boolean;
   /** Include tool and Cowork activity. On unless disabled. */
   include_tools?: boolean;
+  /** Absolute directory selected by the user. Uses the app's default exports folder when absent. */
+  output_directory?: string;
 }

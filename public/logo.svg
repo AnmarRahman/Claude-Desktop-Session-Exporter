@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Carbon">
+  <title>Carbon</title>
+  <defs>
+    <linearGradient id="clay" x1="0" y1="48" x2="0" y2="976" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D87C5E"/>
+      <stop offset="1" stop-color="#B04F2F"/>
+    </linearGradient>
+    <mask id="knockout">
+      <rect x="0" y="0" width="1024" height="1024" fill="black"/>
+      <rect x="232" y="228" width="560" height="432" rx="116" fill="white"/>
+      <polygon points="352,632 352,798 474,648" fill="white"/>
+      <rect x="476" y="292" width="72" height="200" fill="black"/>
+      <polygon points="398,462 626,462 512,598" fill="black"/>
+    </mask>
+  </defs>
+  <rect x="48" y="48" width="928" height="928" rx="208" fill="url(#clay)"/>
+  <rect x="0" y="0" width="1024" height="1024" fill="#FFFDFA" mask="url(#knockout)"/>
+</svg>

@@ -23,6 +23,7 @@ use super::paths;
 pub enum ShellMode {
     Chat,
     Code,
+    Cowork,
     Other(String),
 }
 
@@ -103,10 +104,15 @@ fn extract_sidebar_selected_mode(text: &str) -> Option<ShellMode> {
 
     let matches: Vec<_> = text.match_indices("sidebar-selected-mode").collect();
     matches.into_iter().rev().find_map(|(at, marker)| {
-        let window: String = text[at + marker.len()..].chars().take(WINDOW_CHARS).collect();
-        ["chat", "home", "task", "code"]
+        let window: String = text[at + marker.len()..]
+            .chars()
+            .take(WINDOW_CHARS)
+            .collect();
+        ["chat", "home", "task", "code", "cowork"]
             .into_iter()
-            .filter_map(|mode| find_json_string_value(&window, mode).map(|found_at| (found_at, mode)))
+            .filter_map(|mode| {
+                find_json_string_value(&window, mode).map(|found_at| (found_at, mode))
+            })
             .min_by_key(|(found_at, _)| *found_at)
             .map(|(_, mode)| classify(mode))
     })
@@ -135,10 +141,16 @@ fn find_json_string_value(window: &str, mode: &str) -> Option<usize> {
     None
 }
 
+/// Cowork is its own shell, not a flavour of Code.
+///
+/// Claude Desktop can write `"cowork"` here, and it maps to the separate nested
+/// Cowork store rather than ordinary Claude Code transcripts. The value may be
+/// missing or stale, so exact exports still use the selected session ID.
 fn classify(mode: &str) -> ShellMode {
     match mode {
         "chat" | "home" | "task" => ShellMode::Chat,
         "code" => ShellMode::Code,
+        "cowork" => ShellMode::Cowork,
         other => ShellMode::Other(other.to_string()),
     }
 }
@@ -163,7 +175,10 @@ mod tests {
         );
         // The compacted profile that motivated this has no dframe-store at all.
         assert_eq!(extract_last_known_mode(LIVE_SIDEBAR_RECORD), None);
-        assert_eq!(extract_shell_mode(LIVE_SIDEBAR_RECORD), Some(ShellMode::Chat));
+        assert_eq!(
+            extract_shell_mode(LIVE_SIDEBAR_RECORD),
+            Some(ShellMode::Chat)
+        );
     }
 
     #[test]
@@ -238,6 +253,35 @@ mod tests {
         assert_eq!(
             extract_last_known_mode(r#"{"lastKnownMode":"task"}"#),
             Some(ShellMode::Chat)
+        );
+        assert_eq!(
+            extract_last_known_mode(r#"{"lastKnownMode":"code"}"#),
+            Some(ShellMode::Code)
+        );
+    }
+
+    /// Observed live on 2026-08-12: Claude Desktop wrote `"cowork"` here while a
+    /// Cowork session was on screen. Classifying it as `Other` sent every caller
+    /// down its web-cache fallback, so Cowork sessions reported as Home chats.
+    #[test]
+    fn reads_cowork_as_its_own_mode() {
+        assert_eq!(
+            extract_last_known_mode(r#"{"lastKnownMode":"cowork"}"#),
+            Some(ShellMode::Cowork)
+        );
+        assert_eq!(
+            extract_sidebar_selected_mode("sidebar-selected-mode\u{1}\u{94}\"cowork\""),
+            Some(ShellMode::Cowork)
+        );
+    }
+
+    /// Cowork must not be read as Code: they are separate stores, and `code`
+    /// would export a Claude Code transcript for a Cowork session.
+    #[test]
+    fn does_not_confuse_cowork_with_code() {
+        assert_ne!(
+            extract_last_known_mode(r#"{"lastKnownMode":"cowork"}"#),
+            Some(ShellMode::Code)
         );
         assert_eq!(
             extract_last_known_mode(r#"{"lastKnownMode":"code"}"#),

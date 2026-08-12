@@ -103,6 +103,16 @@ pub fn local_storage_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Directories holding per-window renderer session state. Claude's chat drawer
+/// stores a snapshot timestamp for each conversation here.
+pub fn session_storage_dirs() -> Vec<PathBuf> {
+    claude_data_dirs()
+        .into_iter()
+        .map(|root| root.join("Session Storage"))
+        .filter(|dir| dir.is_dir())
+        .collect()
+}
+
 /// Which on-disk format a Chromium cache directory uses.
 ///
 /// Chromium has two HTTP cache backends. This reader implements the simple

@@ -1,16 +1,18 @@
+<img src="public/logo.svg" alt="" width="88" height="88" align="left" hspace="12" />
+
 # Claude Session Exporter
 
-Claude Session Exporter is a local-first desktop application for capturing the currently open Claude Desktop conversation and, eventually, exporting it as a complete, well-formatted PDF.
+Claude Session Exporter is a local-first desktop application for discovering and exporting Claude Desktop conversations and, eventually, preserving them as complete, well-formatted PDFs.
 
 The project is built with Tauri 2, React, TypeScript, and Rust. The long-term goal is to preserve Claude chats and Claude Cowork sessions with searchable text, code blocks, tables, images, file cards, and activity cards whenever the operating system exposes them.
 
-> Current status: transcript export works on macOS. Regular Claude Home/Cowork conversations export to Markdown and JSON, and Claude Code sessions export on Windows. The Home/Cowork reader is written to be platform-neutral but has only been run against a real macOS profile. A conversation picker, HTML preview, and PDF export are not implemented yet.
+> Current status: transcript export works on macOS and produces Markdown, JSON, and a paginated PDF. Regular Claude Home conversations use the local Chromium cache. Cowork sessions use `local-agent-mode-sessions` metadata and session-nested JSONL transcripts; Desktop Code sessions use `claude-code-sessions` metadata and the shared `~/.claude/projects` tree. All three sources are searchable and selectable in the app. HTML preview is not implemented yet.
 
 ## Why This Exists
 
 Claude Desktop conversations can contain useful work: plans, decisions, code, diagrams, files, screenshots, and Cowork activity. Claude Session Exporter turns a session into a durable local artifact without Claude's built-in print flow, without credentials, and without contacting any server.
 
-It does this by reading the data Claude Desktop already stored on your own machine: the Chromium HTTP response cache for Home/Cowork chats, and the JSONL transcripts for Claude Code sessions. Those formats are undocumented and can change without notice — see [docs/WEB_CACHE.md](docs/WEB_CACHE.md) for exactly what is read and what the limits are.
+It does this by reading the data Claude Desktop already stored on your own machine: the Chromium HTTP response cache for Home chats, Cowork's `local-agent-mode-sessions`, and Desktop Code's `claude-code-sessions` plus `~/.claude/projects`. Those formats are undocumented and can change without notice — see [docs/WEB_CACHE.md](docs/WEB_CACHE.md) for the cache reader's limits.
 
 The target workflow is:
 
@@ -21,14 +23,19 @@ Open Claude Session Exporter
 Export the session
 ```
 
-That produces Markdown and JSON in `src-tauri/exports/`. Preview and PDF generation are later phases.
+That produces Markdown, JSON, and PDF files in the extraction directory selected in the app. Without a custom selection, the app uses its local `exports/` directory. HTML preview is a later phase.
 
 ## Features Implemented So Far
 
 - Tauri 2 desktop shell with React and TypeScript.
-- Home/Cowork conversation export from Claude Desktop's local response cache: title, both roles, message order, timestamps, code, tool and Cowork activity, attachment and file metadata. **Verified on macOS only** — the Windows cache may use a different Chromium backend, which is detected and reported rather than misread.
-- Claude Code session export on Windows, from local JSONL transcripts.
-- Markdown and JSON output, with optional thinking blocks and optional tool activity.
+- Home conversation export from Claude Desktop's local response cache: title, both roles, message order, timestamps, code, tool activity, attachment and file metadata. **Verified on macOS only** — the Windows cache may use a different Chromium backend, which is detected and reported rather than misread.
+- Filesystem-first Cowork discovery on macOS from `~/Library/Application Support/Claude/local-agent-mode-sessions/**/local_*.json`, joined by exact `cliSessionId` to the same session's nested `.claude/projects/**/<cliSessionId>.jsonl`.
+- Desktop Code discovery from `claude-code-sessions` metadata and shared `~/.claude/projects/**/*.jsonl`; nested `subagents` transcripts are excluded from the session list.
+- Unified, searchable Home, Cowork, and Claude Code picker and exact-session export, independent of whether Claude Desktop is running.
+- Active conversation matching from Claude's Session Storage chat-drawer snapshots, with macOS window-title matching as a fallback.
+- Cowork diagnostics for roots, record counts, matches, missing transcripts, duplicates, and selected-session paths/metadata.
+- Markdown, JSON, and native A4 PDF output, with optional thinking blocks and optional tool activity.
+- Persistent extraction-directory picker, default-folder reset, and one-click opening in Finder or File Explorer.
 - Source selector: Auto, Home / Cowork, Claude Code — where Auto refuses to fall back to a stale Claude Code session while Claude Desktop is showing Home/Chat.
 - Windows-native capture boundary written in Rust.
 - Claude process detection.
@@ -45,12 +52,8 @@ That produces Markdown and JSON in `src-tauri/exports/`. Preview and PDF generat
 
 ## Not Implemented Yet
 
-- A picker for choosing which cached conversation to export; today it exports the most recently opened one.
-- PDF export.
 - HTML preview.
 - Images: only file and attachment metadata is exported, not image bytes.
-- Claude Code export on macOS.
-- Claude Desktop detection on macOS.
 
 ## Privacy Model
 
@@ -67,20 +70,22 @@ It should not:
 
 It does read Claude Desktop's own local data files, because that is where the transcripts are. Those files are opened read-only and belong to the user running the app.
 
-Exports and developer diagnostic snapshots contain conversation text. They are written to `src-tauri/exports/` and `src-tauri/diagnostics/`, stay on this computer, and should be treated as private files.
+Exports and developer diagnostic snapshots contain conversation text. Exports are written to the directory shown in the app, diagnostics use the app's local `diagnostics/` directory, and both stay on this computer. They should be treated as private files.
 
 ## Architecture
 
 ```text
 Claude Desktop
       |
-      +-- Chromium profile (HTTP cache)  --> Home/Cowork reader   [macOS verified]
+      +-- Chromium profile (HTTP cache)  --> Home reader          [macOS verified]
       |
-      +-- claude-code-sessions + JSONL   --> Claude Code reader   [Windows]
+      +-- local-agent-mode-sessions -- cliSessionId --> nested JSONL --> Cowork
+      |
+      +-- claude-code-sessions + ~/.claude/projects JSONL -------> Claude Code
       |
 Normalized Session Model
       |
-Markdown / JSON     (HTML + PDF still to come)
+Markdown / JSON / PDF     (HTML preview still to come)
 ```
 
 Accessibility (UI Automation on Windows, AXUIElement on macOS) is a separate path
@@ -90,7 +95,7 @@ Important source areas:
 
 - `src/` - React/TypeScript frontend
 - `src-tauri/src/` - Rust native application code
-- `src-tauri/src/capture/web_cache/` - Home/Cowork transcripts, platform-neutral
+- `src-tauri/src/capture/web_cache/` - Home transcripts, platform-neutral
 - `src-tauri/src/capture/windows/` - Windows process, window, UIA, Claude Code transcripts
 - `src-tauri/src/capture/claude/` - Claude-specific detection and analysis rules
 - `docs/` - architecture notes and platform assumptions
@@ -185,11 +190,29 @@ Still needs live manual validation:
 - identifying the likely conversation/timeline container
 - checking whether Cowork activity cards appear in UIA
 
+## Logo
+
+The app mark is **Carbon** — a speech bubble with a download arrow knocked out
+of it, for a conversation written to disk. Three shapes, so it still reads at
+16x16.
+
+`tools/generate_logo.py` is the source of truth. It holds the geometry and emits
+both `public/logo.svg` and every raster size in `src-tauri/icons/`, so the vector
+art and the bundled icons cannot drift apart. It is stdlib-only — `zlib` writes
+the PNG and ICO containers, and macOS `iconutil` packs the `.icns` — so no image
+toolchain is needed to rebuild the assets:
+
+```bash
+python3 tools/generate_logo.py
+```
+
+Edit the constants near the top of that file to change the mark, then re-run it.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Capture Engine](docs/CAPTURE_ENGINE.md)
-- [Home/Cowork Transcript Source](docs/WEB_CACHE.md)
+- [Home Transcript Source](docs/WEB_CACHE.md)
 - [Windows Notes](docs/WINDOWS.md)
 - [macOS Notes](docs/MACOS.md)
 - [Claude UI Assumptions](docs/CLAUDE_UI_ASSUMPTIONS.md)
@@ -200,7 +223,7 @@ Still needs live manual validation:
 1. Add a picker for choosing which cached conversation to export.
 2. Confirm the Windows cache backend on a real install, and re-validate the whole Windows runtime path after the shared-reader refactor.
 3. Implement Claude Desktop detection on macOS, and port Claude Code export to macOS.
-4. Add HTML preview and PDF export.
+4. Add HTML preview and richer PDF styling for images and tables.
 5. Add image capture for content the payload only references.
 6. Present Cowork activity cards distinctly rather than as generic tool blocks.
 7. Package polished Windows and macOS builds.

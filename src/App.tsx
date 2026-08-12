@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
   AlertCircle,
@@ -6,9 +7,12 @@ import {
   Camera,
   CheckCircle2,
   ChevronRight,
+  ExternalLink,
   FileText,
+  FolderOpen,
   Loader2,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   Settings,
@@ -23,7 +27,8 @@ import type {
   ClaudeDetection,
   DiagnosticSaveResult,
   InspectorOptions,
-  SessionMetadata,
+  LocalSessionDiscovery,
+  LocalSessionSummary,
   VisibleContentCapture,
 } from "./types";
 
@@ -45,20 +50,29 @@ const emptyDetection: ClaudeDetection = {
   message: "Claude Desktop has not been checked yet.",
 };
 
-const emptySession: SessionMetadata = {
-  session_type: "unknown",
-};
-
 const SOURCE_LABELS: Record<"auto" | "home" | "cowork" | "code", string> = {
   auto: "the auto-detected source",
   home: "the Home chat",
-  cowork: "the most recent Cowork session",
-  code: "the most recent Claude Code session",
+  cowork: "the selected Cowork session",
+  code: "the selected Claude Code session",
 };
+
+const EXPORT_DIRECTORY_STORAGE_KEY = "claude-session-exporter.output-directory";
+
+function storedExportDirectory(): string {
+  try {
+    return window.localStorage.getItem(EXPORT_DIRECTORY_STORAGE_KEY)?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
 
 function App() {
   const [detection, setDetection] = useState<ClaudeDetection>(emptyDetection);
-  const [session, setSession] = useState<SessionMetadata>(emptySession);
+  const [localDiscovery, setLocalDiscovery] = useState<LocalSessionDiscovery | null>(null);
+  const [selectedLocalSessionId, setSelectedLocalSessionId] = useState<string | null>(null);
+  const [sessionSearch, setSessionSearch] = useState("");
+  const [sessionsExpanded, setSessionsExpanded] = useState(false);
   const [snapshot, setSnapshot] = useState<AccessibilitySnapshot | null>(null);
   const [selectedNode, setSelectedNode] = useState<AccessibilityNode | null>(null);
   const [expandedNodeIds, setExpandedNodeIds] = useState<Set<number>>(new Set());
@@ -71,7 +85,10 @@ function App() {
   const [isInspecting, setIsInspecting] = useState(false);
   const [isCapturingVisible, setIsCapturingVisible] = useState(false);
   const [isExportingChat, setIsExportingChat] = useState(false);
+  const [isChoosingExportDirectory, setIsChoosingExportDirectory] = useState(false);
+  const [isOpeningExportDirectory, setIsOpeningExportDirectory] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [exportDirectory, setExportDirectory] = useState(storedExportDirectory);
   const [developerMode, setDeveloperMode] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inspectorError, setInspectorError] = useState<string | null>(null);
@@ -85,11 +102,30 @@ function App() {
     run: () => Promise<void>;
   } | null>(null);
 
+  const selectedLocalSession = useMemo(
+    () => localDiscovery?.sessions.find((item) => item.cli_session_id === selectedLocalSessionId) ?? null,
+    [localDiscovery, selectedLocalSessionId],
+  );
+  const selectedSessionIsDetected =
+    detection.detected
+    && selectedLocalSession !== null
+    && localDiscovery?.active_session_id === selectedLocalSession.cli_session_id;
+
+  const visibleLocalSessions = useMemo(() => {
+    const query = sessionSearch.trim().toLocaleLowerCase();
+    if (!query) return localDiscovery?.sessions ?? [];
+    return (localDiscovery?.sessions ?? []).filter((item) =>
+      [item.title, item.source_type, item.cwd, item.model]
+        .filter(Boolean)
+        .some((value) => value!.toLocaleLowerCase().includes(query)),
+    );
+  }, [localDiscovery, sessionSearch]);
+
   const detectedTitle = useMemo(() => {
-    if (session.title) return session.title;
+    if (selectedLocalSession) return selectedLocalSession.title;
     const titledWindow = detection.windows.find((window) => window.title.trim().length > 0);
     return titledWindow?.title;
-  }, [detection.windows, session.title]);
+  }, [detection.windows, selectedLocalSession]);
 
   const inspectorOptions = useMemo<InspectorOptions>(
     () => ({ max_depth: maxDepth, max_elements: maxElements, tree_view: treeView }),
@@ -114,16 +150,28 @@ function App() {
     setIsChecking(true);
     setError(null);
     try {
-      const [nextDetection, nextSession] = await Promise.all([
+      const [nextDetection, nextLocalDiscovery] = await Promise.all([
         invoke<ClaudeDetection>("detect_claude"),
-        invoke<SessionMetadata>("get_active_session"),
+        invoke<LocalSessionDiscovery>("discover_local_sessions"),
       ]);
       setDetection(nextDetection);
-      setSession(nextSession);
+      setLocalDiscovery(nextLocalDiscovery);
+      const currentSession = nextLocalDiscovery.sessions.find(
+        (item) => item.cli_session_id === selectedLocalSessionId,
+      );
+      const windowMatch = matchSessionToWindow(nextDetection, nextLocalDiscovery.sessions);
+      const stateMatch = nextDetection.detected
+        ? nextLocalDiscovery.sessions.find(
+            (item) => item.cli_session_id === nextLocalDiscovery.active_session_id,
+          )
+        : undefined;
+      const nextSelected = windowMatch ?? stateMatch ?? currentSession ?? nextLocalDiscovery.sessions[0] ?? null;
+      setSelectedLocalSessionId(nextSelected?.cli_session_id ?? null);
+      if (nextSelected) setExportSource(exportSourceForSession(nextSelected));
     } catch (unknownError) {
       setError(formatInvokeError(unknownError));
       setDetection(emptyDetection);
-      setSession(emptySession);
+      setLocalDiscovery(null);
     } finally {
       setIsChecking(false);
     }
@@ -214,12 +262,11 @@ function App() {
   function exportChatTranscript() {
     // Naming the resolved conversation here is the only check the user gets that
     // Auto picked the right session: Claude's shell-mode keys are often missing,
-    // so Auto can resolve to a stale Home/Cowork chat while Claude Code is open.
-    const target = session.title
-      ? `"${session.title}"`
-      : "the most recently opened conversation";
+    // so Auto can resolve to a stale Home chat while a local session is open.
+    const localTarget = exportSource !== "auto" ? selectedLocalSession : null;
+    const target = localTarget?.title;
     requestConfirm(
-      `Export ${SOURCE_LABELS[exportSource]} — ${target} — as Markdown and JSON on this computer. Confirm this is the session you expect before continuing.`,
+      `Export ${SOURCE_LABELS[exportSource]} — ${target ? `"${target}"` : "the most recent available conversation"} — as Markdown, JSON, and PDF into ${exportDirectory ? `"${exportDirectory}"` : "the default extraction directory"}.`,
       "Export Transcript",
       runExportChatTranscript,
     );
@@ -229,11 +276,16 @@ function App() {
     setIsExportingChat(true);
     setError(null);
     setInspectorError(null);
+    setChatExport(null);
     try {
-      const options: ChatExportOptions = { source: exportSource };
+      const options: ChatExportOptions = {
+        source: exportSource,
+        conversation_id: exportSource === "auto" ? undefined : selectedLocalSession?.cli_session_id,
+        output_directory: exportDirectory || undefined,
+      };
       const result = await invoke<ChatExportResult>("export_chat_transcript", { options });
       setChatExport(result);
-      setInspectorMessage(`Exported ${result.message_count.toLocaleString()} chat messages to ${result.markdown_path}`);
+      setInspectorMessage(`Exported ${result.message_count.toLocaleString()} chat messages to Markdown, JSON, and PDF.`);
     } catch (unknownError) {
       const message = formatInvokeError(unknownError);
       setError(message);
@@ -241,6 +293,51 @@ function App() {
       setInspectorMessage(null);
     } finally {
       setIsExportingChat(false);
+    }
+  }
+
+  async function chooseExportDirectory() {
+    setIsChoosingExportDirectory(true);
+    setError(null);
+    try {
+      const selected = await openDirectoryDialog({
+        directory: true,
+        multiple: false,
+        title: "Choose transcript extraction directory",
+        defaultPath: exportDirectory || undefined,
+      });
+      if (typeof selected === "string" && selected.trim()) {
+        const directory = selected.trim();
+        setExportDirectory(directory);
+        window.localStorage.setItem(EXPORT_DIRECTORY_STORAGE_KEY, directory);
+      }
+    } catch (unknownError) {
+      setError(formatInvokeError(unknownError));
+    } finally {
+      setIsChoosingExportDirectory(false);
+    }
+  }
+
+  function useDefaultExportDirectory() {
+    setExportDirectory("");
+    try {
+      window.localStorage.removeItem(EXPORT_DIRECTORY_STORAGE_KEY);
+    } catch {
+      // The in-memory setting still resets when storage is unavailable.
+    }
+  }
+
+  async function openExportDirectory(directory = exportDirectory) {
+    setIsOpeningExportDirectory(true);
+    setError(null);
+    try {
+      await invoke<string>("open_export_directory", {
+        outputDirectory: directory || null,
+      });
+    } catch (unknownError) {
+      setError(formatInvokeError(unknownError));
+    } finally {
+      setIsOpeningExportDirectory(false);
     }
   }
 
@@ -256,6 +353,11 @@ function App() {
     });
   }
 
+  function selectLocalSession(item: LocalSessionSummary) {
+    setSelectedLocalSessionId(item.cli_session_id);
+    setExportSource(exportSourceForSession(item));
+  }
+
   useEffect(() => {
     void refreshClaudeStatus();
   }, []);
@@ -263,9 +365,13 @@ function App() {
   return (
     <main className="app-shell">
       <section className="toolbar" aria-label="Application toolbar">
-        <div>
-          <p className="eyebrow">Claude Desktop</p>
-          <h1>Claude Session Exporter</h1>
+        <div className="wordmark">
+          {/* Decorative: the heading beside it already names the app. */}
+          <img className="logo" src="/logo.svg" alt="" width={44} height={44} />
+          <div>
+            <p className="eyebrow">Claude Desktop</p>
+            <h1>Claude Session Exporter</h1>
+          </div>
         </div>
         <button className="icon-button" type="button" onClick={() => setDeveloperMode((value) => !value)}>
           <Settings size={18} aria-hidden="true" />
@@ -289,12 +395,12 @@ function App() {
 
           <dl className="facts">
             <div>
-              <dt>Current Session</dt>
+              <dt>{selectedSessionIsDetected ? "Detected Session" : "Selected Session"}</dt>
               <dd>{detectedTitle ?? "No conversation detected yet"}</dd>
             </div>
             <div>
-              <dt>Session Type</dt>
-              <dd>{session.session_type === "unknown" ? "Claude session" : session.session_type}</dd>
+              <dt>Source</dt>
+              <dd>{selectedLocalSession?.source_type ?? "No source selected"}</dd>
             </div>
             <div>
               <dt>Platform Adapter</dt>
@@ -316,7 +422,7 @@ function App() {
           {!detection.detected && (
             <div className="notice">
               <p>Claude Desktop was not detected.</p>
-              <p>Open Claude and navigate to the conversation you want to export.</p>
+              <p>Stored Cowork and Claude Code sessions remain discoverable and exportable while it is closed.</p>
             </div>
           )}
 
@@ -326,6 +432,70 @@ function App() {
               <span>{error}</span>
             </div>
           )}
+
+          <div className="local-sessions">
+            <div className="local-sessions-heading">
+              <div>
+                <p className="label">Stored sessions</p>
+                <p className="muted">Home chats, Cowork sessions, and Claude Code sessions found on this device.</p>
+              </div>
+              <button
+                className="session-toggle"
+                type="button"
+                aria-expanded={sessionsExpanded}
+                aria-controls="stored-session-list"
+                onClick={() => setSessionsExpanded((value) => !value)}
+              >
+                <span>{localDiscovery?.sessions.length ?? 0} extractable</span>
+                <ChevronRight className={sessionsExpanded ? "expanded" : ""} size={17} aria-hidden="true" />
+              </button>
+            </div>
+            {sessionsExpanded && (
+              <div id="stored-session-list">
+                {selectedSessionIsDetected ? (
+                  <p className="selection-note detected-selection">
+                    Matched from Claude's current chat-drawer state. You can select a different conversation below.
+                  </p>
+                ) : (
+                  <p className="selection-note">
+                    Select the conversation you want to export. If Claude has not persisted its active drawer state and macOS hides the window title, the visible conversation cannot be matched automatically.
+                  </p>
+                )}
+                <label className="session-search">
+                  <Search size={16} aria-hidden="true" />
+                  <span className="sr-only">Search stored sessions</span>
+                  <input
+                    type="search"
+                    value={sessionSearch}
+                    onChange={(event) => setSessionSearch(event.target.value)}
+                    placeholder="Search titles, source, folder, or model"
+                  />
+                </label>
+                {localDiscovery && localDiscovery.sessions.length > 0 ? (
+                  <div className="session-list" role="listbox" aria-label="Stored Claude sessions">
+                    {visibleLocalSessions.map((item) => (
+                      <button
+                        className={`session-item${selectedLocalSessionId === item.cli_session_id ? " selected" : ""}`}
+                        key={item.cli_session_id}
+                        type="button"
+                        role="option"
+                        aria-selected={selectedLocalSessionId === item.cli_session_id}
+                        onClick={() => selectLocalSession(item)}
+                      >
+                        <strong>{item.title}</strong>
+                        <span>{formatSessionSubtitle(item)}</span>
+                        <small>{item.cwd ?? item.transcript_path}</small>
+                        <small>{formatLastActive(item.last_activity_at)}</small>
+                      </button>
+                    ))}
+                    {visibleLocalSessions.length === 0 && <p className="muted empty-sessions">No sessions match that search.</p>}
+                  </div>
+                ) : (
+                  <p className="muted empty-sessions">No stored transcripts were found.</p>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className="options">
             <p className="label">Capture options</p>
@@ -339,13 +509,69 @@ function App() {
             </div>
           </div>
 
+          <div className="export-directory">
+            <div className="export-directory-copy">
+              <p className="label">Extraction directory</p>
+              <p className="export-directory-path" title={exportDirectory || "Default exports folder"}>
+                {exportDirectory || "Default exports folder (./exports)"}
+              </p>
+              <p className="muted">
+                {exportDirectory ? "This folder is saved for future app launches." : "Choose a folder to replace the app default."}
+              </p>
+            </div>
+            <div className="directory-actions">
+              <button
+                className="secondary"
+                type="button"
+                disabled={isChoosingExportDirectory || isExportingChat || pendingConfirm !== null}
+                onClick={chooseExportDirectory}
+              >
+                {isChoosingExportDirectory ? <Loader2 className="spin" size={17} aria-hidden="true" /> : <FolderOpen size={17} aria-hidden="true" />}
+                <span>Change</span>
+              </button>
+              {exportDirectory && (
+                <button
+                  className="secondary"
+                  type="button"
+                  disabled={isExportingChat || pendingConfirm !== null}
+                  onClick={useDefaultExportDirectory}
+                >
+                  <RotateCcw size={17} aria-hidden="true" />
+                  <span>Use Default</span>
+                </button>
+              )}
+              <button
+                className="secondary"
+                type="button"
+                disabled={isOpeningExportDirectory}
+                onClick={() => void openExportDirectory()}
+              >
+                {isOpeningExportDirectory ? <Loader2 className="spin" size={17} aria-hidden="true" /> : <ExternalLink size={17} aria-hidden="true" />}
+                <span>Open Folder</span>
+              </button>
+            </div>
+          </div>
+
           <div className="actions">
             <label className="source-select">
               <span>Source</span>
               <select
                 value={exportSource}
                 disabled={pendingConfirm !== null}
-                onChange={(event) => setExportSource(event.target.value as "auto" | "home" | "cowork" | "code")}
+                onChange={(event) => {
+                  const source = event.target.value as "auto" | "home" | "cowork" | "code";
+                  setExportSource(source);
+                  if (source !== "auto") {
+                    const sourceType =
+                      source === "cowork"
+                        ? "Claude Desktop Cowork"
+                        : source === "home"
+                          ? "Claude Home Chat"
+                          : "Claude Code";
+                    const first = localDiscovery?.sessions.find((item) => item.source_type === sourceType);
+                    setSelectedLocalSessionId(first?.cli_session_id ?? null);
+                  }
+                }}
               >
                 <option value="auto">Auto</option>
                 <option value="home">Home chat</option>
@@ -356,8 +582,8 @@ function App() {
             <button
               className="primary"
               type="button"
-              disabled={!detection.detected || isExportingChat || pendingConfirm !== null}
-              title="Exports the detected Claude transcript to local Markdown and JSON files."
+              disabled={isExportingChat || pendingConfirm !== null || (exportSource !== "auto" && !selectedLocalSession)}
+              title="Exports the selected Claude transcript to local Markdown, JSON, and PDF files."
               aria-label="Export Claude chat transcript"
               onClick={exportChatTranscript}
             >
@@ -368,7 +594,7 @@ function App() {
               className="secondary"
               type="button"
               disabled={!detection.detected || isCapturingVisible || pendingConfirm !== null}
-              title="Captures the currently visible Claude window to a local image. Scrolling and PDF export are not implemented yet."
+              title="Captures the currently visible Claude window to a local image. Scrolling capture is not implemented yet."
               aria-label="Capture visible Claude content"
               onClick={captureVisibleContent}
             >
@@ -380,6 +606,30 @@ function App() {
               <span>Retry</span>
             </button>
           </div>
+
+          {chatExport && (
+            <div className="export-success" role="status" aria-live="polite">
+              <CheckCircle2 size={22} aria-hidden="true" />
+              <div>
+                <strong>Transcript extracted successfully</strong>
+                <p>{chatExport.message_count.toLocaleString()} messages from “{chatExport.title}”.</p>
+                <dl>
+                  <div><dt>PDF</dt><dd>{chatExport.pdf_path}</dd></div>
+                  <div><dt>Markdown</dt><dd>{chatExport.markdown_path}</dd></div>
+                  <div><dt>JSON</dt><dd>{chatExport.json_path}</dd></div>
+                </dl>
+                <button
+                  className="secondary export-open-folder"
+                  type="button"
+                  onClick={() => void openExportDirectory(chatExport.output_directory)}
+                >
+                  <FolderOpen size={16} aria-hidden="true" />
+                  <span>Open extraction folder</span>
+                </button>
+                {chatExport.warnings.map((warning) => <p className="warning" key={warning}>{warning}</p>)}
+              </div>
+            </div>
+          )}
 
           {pendingConfirm && (
             <div className="confirm-bar" role="alertdialog" aria-label="Confirm action">
@@ -397,9 +647,9 @@ function App() {
         </div>
 
         <aside className="summary-panel" aria-label="Phase summary">
-          <Metric value={detection.processes.length} label="Claude processes" />
-          <Metric value={detection.windows.length} label="Claude windows" />
-          <Metric value={snapshot?.element_count ?? 0} label="UIA elements" />
+          <Metric value={localDiscovery?.sessions.length ?? 0} label="Local sessions" />
+          <Metric value={localDiscovery?.diagnostics.cowork_matches ?? 0} label="Cowork matches" />
+          <Metric value={localDiscovery?.diagnostics.unmatched_cowork_metadata ?? 0} label="Missing transcripts" />
         </aside>
       </section>
 
@@ -408,7 +658,7 @@ function App() {
           <div className="section-header">
             <div>
               <p className="eyebrow">Developer Tools</p>
-              <h2>Accessibility Inspector</h2>
+              <h2>Developer Inspector</h2>
             </div>
             <div className="actions compact">
               <button className="secondary" type="button" onClick={loadAccessibilitySnapshot} disabled={isInspecting}>
@@ -459,17 +709,6 @@ function App() {
               ))}
             </div>
           )}
-          {chatExport && (
-            <div className="notice">
-              <p>Exported {chatExport.message_count.toLocaleString()} chat messages from {chatExport.title}.</p>
-              <p>Source: {chatExport.source_type}</p>
-              <p>Markdown: {chatExport.markdown_path}</p>
-              <p>JSON: {chatExport.json_path}</p>
-              {chatExport.warnings.map((warning) => (
-                <p key={warning}>{warning}</p>
-              ))}
-            </div>
-          )}
           {inspectorError && (
             <div className="error diagnostic-status">
               <AlertCircle size={18} aria-hidden="true" />
@@ -479,6 +718,64 @@ function App() {
           {inspectorMessage && !inspectorError && <p className="notice diagnostic-status">{inspectorMessage}</p>}
 
           <div className="diagnostic-content">
+            <div className="diagnostic-card text-card">
+              <div className="card-title">
+                <Activity size={18} aria-hidden="true" />
+                <h3>Cowork Filesystem Discovery</h3>
+              </div>
+              {localDiscovery ? (
+                <>
+                  <dl className="property-list discovery-properties">
+                    <DiagnosticRow label="Desktop Code metadata" value={`${foundLabel(localDiscovery.diagnostics.metadata_root_found)} — ${localDiscovery.diagnostics.metadata_root}`} />
+                    <DiagnosticRow label="Cowork agent metadata" value={`${foundLabel(localDiscovery.diagnostics.agent_metadata_root_found)} — ${localDiscovery.diagnostics.agent_metadata_root}`} />
+                    <DiagnosticRow label="All metadata records" value={localDiscovery.diagnostics.metadata_records_discovered} />
+                    <DiagnosticRow label="Cowork records" value={localDiscovery.diagnostics.agent_metadata_records_discovered} />
+                    <DiagnosticRow label="Malformed metadata" value={localDiscovery.diagnostics.malformed_metadata_files} />
+                    <DiagnosticRow label="Claude project root" value={`${foundLabel(localDiscovery.diagnostics.claude_projects_root_found)} — ${localDiscovery.diagnostics.claude_projects_root}`} />
+                    <DiagnosticRow label="JSONL transcripts" value={localDiscovery.diagnostics.jsonl_transcripts_discovered} />
+                    <DiagnosticRow label="Nested Cowork JSONLs" value={localDiscovery.diagnostics.nested_cowork_transcripts_discovered} />
+                    <DiagnosticRow label="Cowork matches" value={localDiscovery.diagnostics.cowork_matches} />
+                    <DiagnosticRow label="Active-session signal" value={localDiscovery.active_session_signal ?? "Not available"} />
+                    <DiagnosticRow label="Unmatched metadata" value={localDiscovery.diagnostics.unmatched_cowork_metadata} />
+                    <DiagnosticRow label="Duplicate metadata" value={localDiscovery.diagnostics.duplicate_metadata_records} />
+                  </dl>
+                  {localDiscovery.unmatched_metadata.length > 0 && (
+                    <p className="warning">
+                      Transcript unavailable: {localDiscovery.unmatched_metadata.map((item) => item.title).join(", ")}
+                    </p>
+                  )}
+                  {localDiscovery.diagnostics.warnings.map((warning) => <p className="warning" key={warning}>{warning}</p>)}
+                </>
+              ) : (
+                <p className="muted">Discovery has not completed.</p>
+              )}
+            </div>
+
+            <div className="diagnostic-card text-card">
+              <div className="card-title">
+                <Bug size={18} aria-hidden="true" />
+                <h3>Selected Device Session</h3>
+              </div>
+              {selectedLocalSession ? (
+                <dl className="property-list discovery-properties">
+                  <DiagnosticRow label="Title" value={selectedLocalSession.title} />
+                  <DiagnosticRow label="Source" value={selectedLocalSession.source_type} />
+                  <DiagnosticRow label="Metadata file" value={selectedLocalSession.metadata_path ?? "Not applicable"} />
+                  <DiagnosticRow label="Transcript" value={selectedLocalSession.transcript_path ?? "Transcript unavailable"} />
+                  <DiagnosticRow label="Desktop session ID" value={selectedLocalSession.desktop_session_id ?? "Not available"} />
+                  <DiagnosticRow label={selectedLocalSession.source_type === "Claude Home Chat" ? "Conversation ID" : "CLI session ID"} value={selectedLocalSession.cli_session_id} />
+                  <DiagnosticRow label="cwd" value={selectedLocalSession.cwd ?? "Not available"} />
+                  <DiagnosticRow label="Model" value={selectedLocalSession.model ?? "Not available"} />
+                  <DiagnosticRow label="Effort" value={selectedLocalSession.effort ?? "Not available"} />
+                  <DiagnosticRow label="Created" value={formatTimestamp(selectedLocalSession.created_at)} />
+                  <DiagnosticRow label="Last activity" value={formatTimestamp(selectedLocalSession.last_activity_at)} />
+                  <DiagnosticRow label="Archived" value={formatBoolean(selectedLocalSession.is_archived) ?? "Not available"} />
+                </dl>
+              ) : (
+                <p className="muted">Select a stored session above.</p>
+              )}
+            </div>
+
             <div className="diagnostic-card">
               <div className="card-title">
                 <Activity size={18} aria-hidden="true" />
@@ -567,6 +864,7 @@ function App() {
                   <p><strong>Messages:</strong> {chatExport.message_count.toLocaleString()}</p>
                   <p><strong>Markdown:</strong> {chatExport.markdown_path}</p>
                   <p><strong>JSON:</strong> {chatExport.json_path}</p>
+                  <p><strong>PDF:</strong> {chatExport.pdf_path}</p>
                   <p><strong>Source:</strong> {chatExport.source_path}</p>
                 </div>
               ) : (
@@ -614,6 +912,15 @@ function Metric({ value, label }: { value: number; label: string }) {
     <div className="metric">
       <span>{value}</span>
       <p>{label}</p>
+    </div>
+  );
+}
+
+function DiagnosticRow({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
     </div>
   );
 }
@@ -703,6 +1010,61 @@ function PropertyInspector({ node }: { node: AccessibilityNode }) {
 function formatBoolean(value: boolean | undefined): string | undefined {
   if (value === undefined) return undefined;
   return value ? "Yes" : "No";
+}
+
+function foundLabel(found: boolean): string {
+  return found ? "FOUND" : "NOT FOUND";
+}
+
+function formatTimestamp(timestamp: number | undefined): string {
+  if (!timestamp) return "Not available";
+  const milliseconds = timestamp < 10_000_000_000 ? timestamp * 1000 : timestamp;
+  const date = new Date(milliseconds);
+  return Number.isNaN(date.getTime()) ? String(timestamp) : date.toLocaleString();
+}
+
+function formatLastActive(timestamp: number | undefined): string {
+  return timestamp ? `Last active ${formatTimestamp(timestamp)}` : "Last activity unavailable";
+}
+
+function formatModel(model: string | undefined): string | undefined {
+  if (!model) return undefined;
+  return model
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatSessionSubtitle(session: LocalSessionSummary): string {
+  const source =
+    session.source_type === "Claude Desktop Cowork"
+      ? "Cowork"
+      : session.source_type === "Claude Home Chat"
+        ? "Home chat"
+        : "Claude Code";
+  return [source, formatModel(session.model), session.effort].filter(Boolean).join(" • ");
+}
+
+function exportSourceForSession(session: LocalSessionSummary): "home" | "cowork" | "code" {
+  if (session.source_type === "Claude Desktop Cowork") return "cowork";
+  if (session.source_type === "Claude Home Chat") return "home";
+  return "code";
+}
+
+function matchSessionToWindow(
+  detection: ClaudeDetection,
+  sessions: LocalSessionSummary[],
+): LocalSessionSummary | undefined {
+  const titles = detection.windows.map((window) => normalizeTitle(window.title)).filter(Boolean);
+  return sessions.find((session) => {
+    const title = normalizeTitle(session.title);
+    return title.length > 0 && titles.some((windowTitle) => windowTitle === title || windowTitle.includes(title));
+  });
+}
+
+function normalizeTitle(value: string): string {
+  return value.replace(/^\*+/, "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
 }
 
 function formatBounds(bounds: { x: number; y: number; width: number; height: number } | undefined): string {

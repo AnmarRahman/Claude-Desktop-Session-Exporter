@@ -1,6 +1,8 @@
-# Claude Home/Cowork Transcript Source
+# Claude Home Transcript Source
 
-This is the source of truth for regular Claude Home/Cowork chat export. It
+This is the source of truth for regular Claude Home chat export. Cowork uses
+`local-agent-mode-sessions` metadata correlated to session-nested JSONL
+transcripts instead. It
 replaces the earlier approach of scanning Local Storage LevelDB files for
 `chat_messages` string fragments, which never worked reliably: Claude compacts
 and rotates those files, and the messages are not there in the first place.
@@ -45,7 +47,7 @@ it is the same Electron/Chromium profile: `Cache/Cache_Data` for entries and
 > installation uses has not been checked. A profile using blockfile will produce
 > a failure message naming the backend rather than a misleading "no transcript
 > found"; see `paths::detect_backend`. Confirm against a real Windows install
-> before treating Windows Home/Cowork export as working.
+> before treating Windows Home export as working.
 
 ## Cache entry format
 
@@ -93,8 +95,9 @@ the list: Chromium's live cache can hold a half-written entry, and turning that
 into a successful export of a *different* chat is the worst failure this reader
 can have. If every stored version fails, the export fails and says so.
 
-Session metadata resolves the same target the same way, so the title the UI shows
-is always the conversation an export would produce.
+The app indexes every usable cached conversation for its searchable picker.
+Choosing a Home row passes its exact conversation UUID to export. "Newest" is
+used only when no explicit Home conversation was selected.
 
 A key counts as a transcript only if it carries the full
 `https://claude.ai/api/organizations/<org>/chat_conversations/<uuid>` route. The

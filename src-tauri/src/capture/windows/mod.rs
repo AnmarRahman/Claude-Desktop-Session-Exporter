@@ -41,30 +41,36 @@ impl CaptureAdapter for WindowsCaptureAdapter {
             .find_map(|window| claude::detection::clean_claude_window_title(&window.title));
         let shell_mode = web_cache::latest_shell_mode();
         let web_session = web_cache::latest_session_metadata();
-        let local_session = transcript::latest_session_metadata();
         let is_chat_mode = shell_mode == Some(web_cache::ShellMode::Chat);
+        // Cowork and Claude Code are separate stores under separate mode names.
+        // Reading `Any` here would let a Cowork session answer for Claude Code
+        // and the other way round, since neither store can be identified after
+        // the fact.
+        let local_store = transcript::local_store_for_mode(shell_mode.as_ref());
+        let local_session = transcript::latest_session_metadata_for(
+            local_store.map_or(transcript::SessionStore::Any, |(store, _)| store),
+        );
 
         Ok(SessionMetadata {
-            title: window_title.or_else(|| {
+            // The title must agree with the `session_type` below: when the mode
+            // names a local store, a web-cache title would label a Home chat as
+            // Cowork or Claude Code.
+            title: crate::capture::active_session_title(
+                window_title,
                 web_session
                     .as_ref()
-                    .and_then(|session| session.title.clone())
-                    .or_else(|| {
-                        if is_chat_mode {
-                            None
-                        } else {
-                            local_session
-                                .as_ref()
-                                .and_then(|session| session.title.clone())
-                        }
-                    })
-            }),
-            session_type: if is_chat_mode || web_session.is_some() {
-                "chat".to_string()
-            } else if local_session.is_some() {
-                "cowork".to_string()
-            } else {
-                "unknown".to_string()
+                    .and_then(|session| session.title.clone()),
+                local_session
+                    .as_ref()
+                    .and_then(|session| session.title.clone()),
+                local_store.is_some(),
+                is_chat_mode,
+            ),
+            session_type: match local_store {
+                Some((_, session_type)) => session_type.to_string(),
+                None if is_chat_mode || web_session.is_some() => "chat".to_string(),
+                None if local_session.is_some() => "cowork".to_string(),
+                None => "unknown".to_string(),
             },
         })
     }
@@ -155,31 +161,43 @@ impl CaptureAdapter for WindowsCaptureAdapter {
         let mut result = match options.source.as_deref().unwrap_or("auto") {
             "home" => return web_cache::export_web_conversation(&options),
             "cowork" => {
-                return transcript::export_latest_session(transcript::SessionStore::Cowork)
+                return transcript::export_session(
+                    transcript::SessionStore::Cowork,
+                    options.conversation_id.as_deref(),
+                    options.output_directory.as_deref(),
+                )
             }
             "code" => {
-                return transcript::export_latest_session(transcript::SessionStore::ClaudeCode)
+                return transcript::export_session(
+                    transcript::SessionStore::ClaudeCode,
+                    options.conversation_id.as_deref(),
+                    options.output_directory.as_deref(),
+                )
             }
-            _ if shell_mode == Some(web_cache::ShellMode::Chat) => {
-                web_cache::export_web_conversation(&options)
-            }
-            _ if shell_mode == Some(web_cache::ShellMode::Code) => {
-                transcript::export_latest_session(transcript::SessionStore::Any)
-                    .or_else(|_| web_cache::export_web_conversation(&options))
-            }
-            _ => web_cache::export_web_conversation(&options)
-                .or_else(|_| transcript::export_latest_session(transcript::SessionStore::Any)),
+            // Identical routing to macOS, by construction.
+            _ => match crate::capture::auto_plan(shell_mode.as_ref()) {
+                crate::capture::AutoPlan::WebCacheOnly => {
+                    web_cache::export_web_conversation(&options)
+                }
+                crate::capture::AutoPlan::LocalStoreOnly(store) => {
+                    transcript::export_latest_session(store, options.output_directory.as_deref())
+                }
+                crate::capture::AutoPlan::WebCacheThenAnyLocal => {
+                    web_cache::export_web_conversation(&options).or_else(|_| {
+                        transcript::export_latest_session(
+                            transcript::SessionStore::Any,
+                            options.output_directory.as_deref(),
+                        )
+                    })
+                }
+            },
         }?;
 
-        // Both mode keys are frequently compacted out of local storage, so
-        // `auto` often picks a source without knowing what is on screen. Say so
-        // rather than implying the choice was informed.
-        if shell_mode.is_none() {
-            result.warnings.insert(
-                0,
-                "Claude Desktop's current mode could not be read, so the source below was chosen without knowing which session is on screen. Check the title; if it is not the session you expected, pick a source explicitly and retry."
-                    .to_string(),
-            );
+        // Both mode keys are frequently compacted out of local storage, and even
+        // a mode that reads cleanly names only a store. Say which of the two
+        // applies rather than implying the choice was fully informed.
+        if let Some(caveat) = crate::capture::auto_source_caveat(shell_mode.as_ref()) {
+            result.warnings.insert(0, caveat.to_string());
         }
 
         Ok(result)

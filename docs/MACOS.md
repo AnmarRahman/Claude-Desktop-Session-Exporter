@@ -2,15 +2,17 @@
 
 ## Working today
 
-Home/Cowork transcript export works on macOS. It reads Claude Desktop's Chromium
+Home transcript export works on macOS. It reads Claude Desktop's Chromium
 profile at `~/Library/Application Support/Claude` — see
 [WEB_CACHE.md](WEB_CACHE.md). This needs no special permission: the profile
 belongs to the user running the app, and the files are only read.
 
-Cowork and Claude Code session export work too, from local JSONL transcripts —
-see the Cowork notes in [CLAUDE_UI_ASSUMPTIONS.md](CLAUDE_UI_ASSUMPTIONS.md).
-`capture/transcript.rs` is now platform-neutral and reads both
-`local-agent-mode-sessions` (Cowork) and `claude-code-sessions` (Claude Code).
+Cowork and Claude Code session export work too, from local JSONL transcripts.
+`capture/cowork.rs` reads Cowork metadata from `local-agent-mode-sessions` and
+joins each record by exact `cliSessionId` to its session-nested JSONL. It also
+reads Desktop Code metadata from `claude-code-sessions` and indexes the shared
+`~/.claude/projects` tree. Nested `subagents` transcripts are excluded.
+`capture/transcript.rs` reuses that classified discovery for export.
 
 Claude Desktop detection works too, via a process scan for the bundle executable
 `/Claude.app/Contents/MacOS/`. That path is what separates Claude Desktop from
@@ -18,19 +20,19 @@ its own helper and framework processes and from the Claude Code CLI, which is a
 different program that also answers to `claude`. It needs no permission.
 
 The shell-mode read (`lastKnownMode`, `sidebar-selected-mode`) is shared with
-Windows, but both keys are frequently compacted out of local storage, so `None`
-is the common answer. The session type falls back to reporting what is actually
-exportable rather than "unknown".
+Windows, but both keys may be missing or stale. It cannot reliably distinguish
+a Home conversation from a Cowork conversation currently displayed in the Home
+surface. The searchable session picker therefore controls exact export.
 
 ## Not implemented yet
 
-- **Window enumeration.** `detect_claude` reports processes but no windows;
-  listing windows needs Accessibility permission, and nothing on the export path
-  requires it.
-- **Selecting *which* Cowork/Claude Code session to export.** The reader takes
-  the most recently touched one in the chosen store. That is correct for Cowork
-  in practice, but there is no reliable signal for which session is on screen.
 - **AXUIElement inspection and visual fallback.** Still scaffolded.
+
+CoreGraphics window enumeration is best effort and permission-free. macOS may
+redact the title; an exposed title is matched to a stored session, while a blank
+title falls back to Claude's Session Storage `chat-drawer-snapshot-store`. Its
+newest snapshot maps the visible Home UUID or Cowork `local_*` ID to the picker.
+If neither exact signal is available, selection remains manual.
 
 ## Permissions
 

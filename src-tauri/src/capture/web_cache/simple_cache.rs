@@ -272,7 +272,9 @@ mod tests {
 
     fn headers_blob() -> Vec<u8> {
         let mut blob = vec![0u8; 12]; // pickle framing we intentionally skip
-        blob.extend_from_slice(b"HTTP/1.1 200\0content-type:application/json\0content-encoding:zstd\0");
+        blob.extend_from_slice(
+            b"HTTP/1.1 200\0content-type:application/json\0content-encoding:zstd\0",
+        );
         blob
     }
 

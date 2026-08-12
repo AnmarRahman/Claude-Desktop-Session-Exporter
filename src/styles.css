@@ -55,9 +55,21 @@ button:disabled {
 .status-row,
 .actions,
 .card-title,
+.wordmark,
 .error {
   align-items: center;
   display: flex;
+}
+
+.wordmark {
+  gap: 14px;
+}
+
+/* The mark carries its own rounded tile, so no radius or border here. */
+.logo {
+  flex: none;
+  height: 44px;
+  width: 44px;
 }
 
 .toolbar,
@@ -192,6 +204,142 @@ dd {
   margin-top: 20px;
 }
 
+.local-sessions {
+  border-top: 1px solid #e8e2d8;
+  margin-top: 20px;
+  padding-top: 20px;
+}
+
+.local-sessions-heading {
+  align-items: end;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.session-toggle {
+  background: transparent;
+  color: #6f6a60;
+  font-size: 12px;
+  min-height: 34px;
+  padding: 0 4px 0 10px;
+}
+
+.session-toggle:hover {
+  background: #f6f2ea;
+}
+
+.session-toggle svg {
+  transition: transform 160ms ease;
+}
+
+.session-toggle svg.expanded {
+  transform: rotate(90deg);
+}
+
+.session-toggle span {
+  color: #6f6a60;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.selection-note {
+  background: #f8f6f1;
+  border-left: 3px solid #b9a98f;
+  color: #5f5a51;
+  font-size: 12px;
+  line-height: 1.45;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+}
+
+.selection-note.detected-selection {
+  background: #eef7f1;
+  border-left-color: #2c7a4b;
+  color: #285b3c;
+}
+
+.session-search {
+  align-items: center;
+  background: #fff;
+  border: 1px solid #d7d0c4;
+  border-radius: 8px;
+  color: #6f6a60;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 0 10px;
+}
+
+.session-search:focus-within {
+  border-color: #9b8060;
+  box-shadow: 0 0 0 2px rgba(155, 128, 96, 0.15);
+}
+
+.session-search input {
+  background: transparent;
+  border: 0;
+  color: #20201d;
+  min-height: 38px;
+  outline: 0;
+  width: 100%;
+}
+
+.sr-only {
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  width: 1px;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.session-list {
+  display: grid;
+  gap: 8px;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.session-item {
+  align-items: start;
+  background: #fbfaf7;
+  border: 1px solid #ebe6dd;
+  color: #20201d;
+  display: grid;
+  font-weight: 500;
+  gap: 3px;
+  justify-items: start;
+  min-height: 0;
+  padding: 11px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.session-item:hover,
+.session-item.selected {
+  background: #f6f2ea;
+  border-color: #b9a98f;
+}
+
+.session-item span {
+  color: #6a5035;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.session-item small {
+  overflow-wrap: anywhere;
+}
+
+.empty-sessions {
+  border: 1px dashed #d7d0c4;
+  border-radius: 8px;
+  padding: 14px;
+}
+
 .option-grid {
   display: grid;
   gap: 10px;
@@ -208,6 +356,49 @@ dd {
   gap: 10px;
   min-height: 40px;
   padding: 8px 10px;
+}
+
+.export-directory {
+  align-items: center;
+  background: #f8f6f1;
+  border: 1px solid #e3ddd3;
+  border-radius: 8px;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-top: 18px;
+  padding: 13px 14px;
+}
+
+.export-directory-copy {
+  min-width: 0;
+}
+
+.export-directory-path {
+  font-size: 13px;
+  font-weight: 750;
+  margin-top: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-directory-copy .muted {
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.directory-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.directory-actions button {
+  min-height: 36px;
+  padding: 0 11px;
 }
 
 .actions {
@@ -256,6 +447,66 @@ dd {
 
 .actions.compact {
   margin-top: 0;
+}
+
+.export-success {
+  align-items: flex-start;
+  background: #eef7f1;
+  border: 1px solid #b9ddc4;
+  border-radius: 8px;
+  color: #285b3c;
+  display: flex;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+}
+
+.export-success > svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.export-success > div {
+  min-width: 0;
+  width: 100%;
+}
+
+.export-success > div > p {
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.export-success dl {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 0;
+}
+
+.export-success dl div {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 72px minmax(0, 1fr);
+}
+
+.export-success dt {
+  color: #477357;
+}
+
+.export-success dd {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.export-success .warning {
+  margin: 10px 0 0;
+}
+
+.export-open-folder {
+  margin-top: 11px;
+  min-height: 34px;
+  padding: 0 10px;
 }
 
 .primary {
@@ -448,6 +699,10 @@ small {
 .property-list dd {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.discovery-properties div {
+  grid-template-columns: 180px minmax(0, 1fr);
 }
 
 .candidate-list,

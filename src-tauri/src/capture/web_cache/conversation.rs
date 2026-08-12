@@ -144,9 +144,11 @@ impl Message {
 
         let mut blocks = Vec::new();
         for attachment in self.attachments.as_deref().unwrap_or_default() {
-            blocks.push(
-                parse_or_raw::<Attachment>(attachment, "attachment", Attachment::to_block),
-            );
+            blocks.push(parse_or_raw::<Attachment>(
+                attachment,
+                "attachment",
+                Attachment::to_block,
+            ));
         }
         for block in self.content.as_deref().unwrap_or_default() {
             blocks.extend(block_from_value(block, options));
@@ -556,7 +558,11 @@ mod tests {
         let messages = parse().to_export_messages(NormalizeOptions::default());
         let tool_use = &messages[1].blocks[0];
         assert_eq!(tool_use.tool_name.as_deref(), Some("web_search"));
-        assert!(tool_use.tool_input.as_deref().unwrap().contains("odoo states"));
+        assert!(tool_use
+            .tool_input
+            .as_deref()
+            .unwrap()
+            .contains("odoo states"));
 
         let tool_result = &messages[1].blocks[1];
         assert_eq!(tool_result.text.as_deref(), Some("result body"));
@@ -585,7 +591,10 @@ mod tests {
         let conversation: Conversation = serde_json::from_str(payload).unwrap();
         let messages = conversation.to_export_messages(NormalizeOptions::default());
         assert_eq!(messages[0].blocks[0].kind, "unknown:future_widget");
-        assert_eq!(messages[0].blocks[0].text.as_deref(), Some("still readable"));
+        assert_eq!(
+            messages[0].blocks[0].text.as_deref(),
+            Some("still readable")
+        );
     }
 
     /// A new field alongside recognized ones must still be preserved: the block
@@ -617,7 +626,10 @@ mod tests {
         let block = &messages[0].blocks[0];
 
         assert_eq!(block.kind, "tool_result");
-        let raw = block.raw.as_deref().expect("unsupported source must be kept");
+        let raw = block
+            .raw
+            .as_deref()
+            .expect("unsupported source must be kept");
         assert!(raw.contains("source"), "{raw}");
     }
 
@@ -733,7 +745,14 @@ mod tests {
         let messages = conversation.to_export_messages(NormalizeOptions::default());
         let raw = messages[0].blocks[0].raw.as_deref().unwrap();
 
-        for field in ["type", "canvas_card", "name", "designer", "input", "is_error"] {
+        for field in [
+            "type",
+            "canvas_card",
+            "name",
+            "designer",
+            "input",
+            "is_error",
+        ] {
             assert!(raw.contains(field), "raw lost {field}: {raw}");
         }
     }

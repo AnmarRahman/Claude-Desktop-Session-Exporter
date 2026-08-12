@@ -64,8 +64,7 @@ mod tests {
 
     #[test]
     fn decodes_gzip_bodies_case_insensitively() {
-        let mut encoder =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(b"hello").unwrap();
         let encoded = encoder.finish().unwrap();
         assert_eq!(decode_body(&encoded, Some("GZIP")).unwrap(), b"hello");
