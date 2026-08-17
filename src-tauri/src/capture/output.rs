@@ -105,6 +105,38 @@ pub fn reserve_export_paths(
     )))
 }
 
+/// Folder created for transcripts when the user has picked no directory.
+const DEFAULT_EXPORT_FOLDER: &str = "Claude Session Exporter";
+
+/// Where transcripts land when the user has selected no extraction directory.
+///
+/// An installed app is launched by the OS rather than from a shell, so the
+/// working directory is arbitrary — `/` on macOS — and a relative `./exports`
+/// would resolve somewhere unwritable. Anchor the default to the user's home
+/// instead, preferring `Documents` when it exists.
+pub fn default_export_directory() -> PathBuf {
+    match home_directory() {
+        Some(home) => {
+            let documents = home.join("Documents");
+            if documents.is_dir() {
+                documents.join(DEFAULT_EXPORT_FOLDER)
+            } else {
+                home.join(DEFAULT_EXPORT_FOLDER)
+            }
+        }
+        None => std::env::temp_dir().join(DEFAULT_EXPORT_FOLDER),
+    }
+}
+
+fn home_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+
+    home.map(PathBuf::from).filter(|path| path.is_absolute())
+}
+
 pub fn prepare_export_directory(requested: Option<&str>) -> Result<PathBuf, CaptureError> {
     let directory = match requested.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => {
@@ -116,9 +148,7 @@ pub fn prepare_export_directory(requested: Option<&str>) -> Result<PathBuf, Capt
             }
             path
         }
-        None => std::env::current_dir()
-            .map_err(|error| CaptureError::Diagnostic(error.to_string()))?
-            .join("exports"),
+        None => default_export_directory(),
     };
 
     if directory.exists() && !directory.is_dir() {
@@ -168,8 +198,19 @@ pub fn open_in_file_manager(directory: &Path) -> Result<(), CaptureError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_export_directory, reserve_export_paths, ExportFormats};
+    use super::{
+        default_export_directory, prepare_export_directory, reserve_export_paths, ExportFormats,
+    };
     use crate::models::ChatExportOptions;
+
+    /// A bundled app inherits an arbitrary working directory, so the default
+    /// must never be relative to it.
+    #[test]
+    fn defaults_to_an_absolute_directory_outside_the_working_directory() {
+        let directory = default_export_directory();
+        assert!(directory.is_absolute());
+        assert!(!directory.starts_with(std::env::current_dir().unwrap()));
+    }
 
     #[test]
     fn creates_an_absolute_custom_directory() {

@@ -280,7 +280,7 @@ pub struct ChatExportOptions {
     pub include_thinking: Option<bool>,
     /// Include tool and Cowork activity. On unless disabled.
     pub include_tools: Option<bool>,
-    /// Absolute directory selected by the user. Uses `./exports` when absent.
+    /// Absolute directory selected by the user. Uses the home-anchored default when absent.
     pub output_directory: Option<String>,
     /// Write a Markdown transcript. On when omitted for backward compatibility.
     pub export_markdown: Option<bool>,

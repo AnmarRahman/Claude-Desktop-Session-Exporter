@@ -24,14 +24,26 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
+    "active": true,
+    "targets": ["dmg", "app", "nsis", "msi"],
+    "category": "Productivity",
+    "shortDescription": "Export Claude Desktop sessions to Markdown, JSON, and PDF.",
+    "longDescription": "Claude Session Exporter reads Claude Desktop's own local files to save Home, Cowork, and Claude Code conversations as Markdown, JSON, and paginated PDFs. It runs entirely on your machine and contacts no server.",
+    "copyright": "Claude Session Exporter Contributors",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }

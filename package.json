@@ -7,7 +7,10 @@
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "tsc && vite build",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bundle": "tauri build",
+    "bundle:mac": "tauri build --target universal-apple-darwin",
+    "bundle:windows": "tauri build --target x86_64-pc-windows-msvc"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.7.0",

@@ -211,7 +211,7 @@ export interface ChatExportOptions {
   include_thinking?: boolean;
   /** Include tool and Cowork activity. On unless disabled. */
   include_tools?: boolean;
-  /** Absolute directory selected by the user. Uses the app's default exports folder when absent. */
+  /** Absolute directory selected by the user. Uses the home-anchored default when absent. */
   output_directory?: string;
   /** Write a Markdown transcript. Defaults to true. */
   export_markdown?: boolean;

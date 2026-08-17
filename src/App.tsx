@@ -103,6 +103,7 @@ function App() {
   const [isOpeningExportDirectory, setIsOpeningExportDirectory] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [exportDirectory, setExportDirectory] = useState(storedExportDirectory);
+  const [defaultExportDirectory, setDefaultExportDirectory] = useState("");
   const [exportFormats, setExportFormats] = useState<Record<ExportFormat, boolean>>({
     markdown: true,
     json: true,
@@ -398,6 +399,13 @@ function App() {
     void refreshClaudeStatus();
   }, []);
 
+  // The default lives in the user's home, so only the backend knows its path.
+  useEffect(() => {
+    invoke<string>("get_default_export_directory")
+      .then(setDefaultExportDirectory)
+      .catch(() => setDefaultExportDirectory(""));
+  }, []);
+
   return (
     <main className="app-shell">
       <section className="toolbar" aria-label="Application toolbar">
@@ -578,8 +586,14 @@ function App() {
           <div className="export-directory">
             <div className="export-directory-copy">
               <p className="label">Extraction directory</p>
-              <p className="export-directory-path" title={exportDirectory || "Default exports folder"}>
-                {exportDirectory || "Default exports folder (./exports)"}
+              <p
+                className="export-directory-path"
+                title={exportDirectory || defaultExportDirectory || "Default folder"}
+              >
+                {exportDirectory ||
+                  (defaultExportDirectory
+                    ? `${defaultExportDirectory} (default)`
+                    : "Default folder")}
               </p>
               <p className="muted">
                 {exportDirectory ? "This folder is saved for future app launches." : "Choose a folder to replace the app default."}

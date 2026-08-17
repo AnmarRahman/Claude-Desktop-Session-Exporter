@@ -121,6 +121,15 @@ fn open_export_directory(output_directory: Option<String>) -> Result<String, Str
     Ok(directory.display().to_string())
 }
 
+/// Lets the UI name the real default destination instead of a relative path
+/// that means nothing once the app is installed.
+#[tauri::command]
+fn get_default_export_directory() -> String {
+    capture::output::default_export_directory()
+        .display()
+        .to_string()
+}
+
 #[tauri::command]
 fn sanitize_filename_part(value: String) -> String {
     filename::sanitize_filename_part(&value, "Claude Session")
@@ -140,6 +149,7 @@ pub fn run() {
             capture_visible_content,
             export_chat_transcript,
             open_export_directory,
+            get_default_export_directory,
             sanitize_filename_part
         ])
         .run(tauri::generate_context!())

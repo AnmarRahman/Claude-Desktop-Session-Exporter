@@ -8,6 +8,25 @@ The project is built with Tauri 2, React, TypeScript, and Rust. The long-term go
 
 > Current status: transcript export works on macOS and produces Markdown, JSON, and a paginated PDF. Regular Claude Home conversations use the local Chromium cache. Cowork sessions use `local-agent-mode-sessions` metadata and session-nested JSONL transcripts; Desktop Code sessions use `claude-code-sessions` metadata and the shared `~/.claude/projects` tree. All three sources are searchable and selectable in the app. HTML preview is not implemented yet.
 
+## Install
+
+Download the installer for your platform from the [Releases page](../../releases) — no toolchain, no Node, no Rust.
+
+| Platform | File | Notes |
+| --- | --- | --- |
+| macOS 10.15+ | `.dmg` | Universal (Apple Silicon and Intel). Open the disk image and drag the app to Applications. |
+| Windows 10/11 | `.exe` | NSIS installer, installs for the current user — no administrator rights needed. |
+| Windows 10/11 | `.msi` | Alternative for managed or scripted deployments. |
+
+The published builds are **not code-signed**, so each operating system warns on first launch:
+
+- **macOS** — right-click the app and choose *Open*, then confirm. Or allow it under System Settings → Privacy & Security → *Open Anyway*. This is only needed once.
+- **Windows** — SmartScreen shows "Windows protected your PC". Choose *More info* → *Run anyway*.
+
+Signing requires a paid Apple Developer account and a Windows code-signing certificate; see [Signed Releases](#signed-releases) if you want to remove the warnings.
+
+Exports are written to `Documents/Claude Session Exporter` unless you pick a different folder in the app.
+
 ## Why This Exists
 
 Claude Desktop conversations can contain useful work: plans, decisions, code, diagrams, files, screenshots, and Cowork activity. Claude Session Exporter turns a session into a durable local artifact without Claude's built-in print flow, without credentials, and without contacting any server.
@@ -23,7 +42,7 @@ Open Claude Session Exporter
 Export the session
 ```
 
-Choose Markdown, JSON, PDF, or any combination of those formats before exporting. The selected files are written to the extraction directory configured in the app; without a custom directory, the app uses its local `exports/` folder. HTML preview is a later phase.
+Choose Markdown, JSON, PDF, or any combination of those formats before exporting. The selected files are written to the extraction directory configured in the app; without a custom directory, the app uses `Documents/Claude Session Exporter` in your home folder. HTML preview is a later phase.
 
 ## Features Implemented So Far
 
@@ -159,17 +178,46 @@ Run the desktop app in development:
 npm.cmd run tauri dev
 ```
 
-Build the Windows app:
+## Building Installers
 
-```powershell
-npm.cmd run tauri build
+Each host can only bundle for its own operating system — Windows installers cannot be produced from macOS, because linking needs the MSVC toolchain.
+
+Bundle for the machine you are on:
+
+```bash
+npm run bundle
 ```
 
-The built executable is generated under:
+Bundle a Universal macOS app that runs on both Apple Silicon and Intel (requires both Rust targets: `rustup target add aarch64-apple-darwin x86_64-apple-darwin`):
 
-```text
-src-tauri/target/release/
+```bash
+npm run bundle:mac
 ```
+
+Bundle on Windows, from a Visual Studio developer environment:
+
+```bat
+npm run bundle:windows
+```
+
+Output lands under `src-tauri/target/<target>/release/bundle/` — `dmg/` and `macos/` on macOS, `nsis/` and `msi/` on Windows. A plain `npm run bundle` with no `--target` writes to `src-tauri/target/release/bundle/` instead.
+
+### Publishing a Release
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds macOS and Windows together on GitHub's runners, so both platforms come from one command:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The workflow runs the test suite, bundles each platform, and opens a **draft** GitHub release with all installers attached. Review it, then publish. Running the workflow manually (`workflow_dispatch`) skips the release and just uploads the installers as build artifacts.
+
+### Signed Releases
+
+Unsigned builds work but trip Gatekeeper and SmartScreen on first launch. To remove those warnings, add the signing secrets to the repository and Tauri picks them up automatically:
+
+- **macOS** — `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` for signing plus notarization. Requires a paid Apple Developer account.
+- **Windows** — a code-signing certificate configured through `bundle.windows.certificateThumbprint` in `tauri.conf.json`, or an Azure Trusted Signing account.
 
 ## Current Verification Status
 
