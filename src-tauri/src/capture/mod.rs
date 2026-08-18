@@ -12,6 +12,8 @@ pub mod cowork;
 mod macos;
 /// Resolves and opens transcript export destinations.
 pub mod output;
+/// Reports export progress to the UI without coupling the pipeline to it.
+pub mod progress;
 /// Native PDF rendering for normalized transcript exports.
 pub mod pdf;
 /// Reads Claude Code and Cowork sessions from local JSONL transcripts.
@@ -139,6 +141,10 @@ pub enum CaptureError {
     Native(String),
     #[error("Diagnostic snapshot failed: {0}")]
     Diagnostic(String),
+    /// The transcript is too large to lay out in reasonable time. Callers skip
+    /// the PDF and still write the other selected formats.
+    #[error("{0}")]
+    PdfTooLarge(String),
 }
 
 #[cfg(windows)]

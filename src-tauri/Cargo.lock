@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "claude-session-exporter"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "axuielement",
  "brotli 7.0.0",

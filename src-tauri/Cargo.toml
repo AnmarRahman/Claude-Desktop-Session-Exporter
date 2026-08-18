@@ -1,6 +1,6 @@
 [package]
 name = "claude-session-exporter"
-version = "0.1.0"
+version = "0.1.2"
 description = "Export open Claude Desktop sessions to structured PDFs."
 authors = ["Claude Session Exporter Contributors"]
 edition = "2021"

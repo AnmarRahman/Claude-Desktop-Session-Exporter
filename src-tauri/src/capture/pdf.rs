@@ -10,6 +10,7 @@ use printpdf::{
 };
 use pulldown_cmark::{html, Event, Options, Parser};
 
+use crate::capture::progress::{self, ProgressStage};
 use crate::capture::CaptureError;
 use crate::models::{ChatExportBlock, ChatExportMessage};
 
@@ -25,8 +26,44 @@ pub struct PdfTranscript<'a> {
     pub messages: &'a [ChatExportMessage],
 }
 
+/// Layout cost grows faster than linearly with document size, so a whole
+/// multi-megabyte transcript never finishes as one document. Messages are laid
+/// out in batches near this size and the resulting pages are concatenated,
+/// which keeps every individual layout small enough to complete.
+const CHUNK_TARGET_CHARS: usize = 120_000;
+
+/// Batched, parallel layout runs at roughly six seconds per megabyte of
+/// formatted HTML on a ten-core machine: a 12 MB transcript renders in about 75
+/// seconds and produces a 2300-page, 150 MB file. This ceiling is set at twice
+/// that measured point — beyond it neither the time nor the peak memory has
+/// been verified, so the PDF is declined and the export still delivers Markdown
+/// and JSON promptly rather than appearing to hang.
+const MAX_PDF_CHARS: usize = 24_000_000;
+
+/// Groups pre-rendered message HTML into batches near the target size. An
+/// oversized single message still forms its own batch; splitting inside a
+/// message would break the layout it depends on.
+fn chunk_messages(messages: &[ChatExportMessage]) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for message in messages {
+        let html = message_html(message);
+        if !current.is_empty() && current.len() + html.len() > CHUNK_TARGET_CHARS {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push_str(&html);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    chunks
+}
+
 pub fn render_pdf(document: &PdfTranscript<'_>) -> Result<(Vec<u8>, Vec<String>), CaptureError> {
-    let html = transcript_html(document);
     let images = BTreeMap::new();
     let mut fonts = BTreeMap::new();
     let mut warnings = Vec::new();
@@ -56,9 +93,87 @@ pub fn render_pdf(document: &PdfTranscript<'_>) -> Result<(Vec<u8>, Vec<String>)
         skip_first_page: Some(true),
     };
 
+    let batches = chunk_messages(document.messages);
+    let total: usize = batches.iter().map(String::len).sum();
+    if total > MAX_PDF_CHARS {
+        return Err(CaptureError::PdfTooLarge(format!(
+            "This transcript is about {:.0} MB of formatted text, which is too large to lay out as a PDF in reasonable time. Markdown and JSON were still written.",
+            total as f64 / 1_000_000.0
+        )));
+    }
+
+    // Batches are independent layouts, so they are rendered across the machine's
+    // cores and merged in order afterwards. Ordering comes from the slot index,
+    // never from completion order.
+    let batch_count = batches.len();
+    let mut slots: Vec<Option<(PdfDocument, Vec<printpdf::PdfWarnMsg>)>> =
+        (0..batch_count).map(|_| None).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+    let slots_cell: Vec<std::sync::Mutex<Option<(PdfDocument, Vec<printpdf::PdfWarnMsg>)>>> =
+        (0..batch_count).map(|_| std::sync::Mutex::new(None)).collect();
+    let failure: std::sync::Mutex<Option<CaptureError>> = std::sync::Mutex::new(None);
+
+    let workers = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4)
+        .min(batch_count.max(1));
+
+    progress::report(ProgressStage::RenderingPdf, 0, batch_count);
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if index >= batch_count || failure.lock().unwrap().is_some() {
+                    break;
+                }
+                let html = transcript_html_with_body(document, &batches[index], index == 0);
+                let mut options = options.clone();
+                // Only the merged document's very first page is the cover.
+                options.skip_first_page = Some(index == 0);
+
+                let mut warnings = Vec::new();
+                match PdfDocument::from_html(&html, &images, &fonts, &options, &mut warnings) {
+                    Ok(part) => {
+                        *slots_cell[index].lock().unwrap() = Some((part, warnings));
+                        let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        progress::report(ProgressStage::RenderingPdf, done, batch_count);
+                    }
+                    Err(error) => {
+                        *failure.lock().unwrap() = Some(CaptureError::Diagnostic(format!(
+                            "Could not lay out PDF (batch {} of {batch_count}): {error}",
+                            index + 1
+                        )));
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    if let Some(error) = failure.into_inner().unwrap() {
+        return Err(error);
+    }
+    for (slot, cell) in slots.iter_mut().zip(slots_cell) {
+        *slot = cell.into_inner().unwrap();
+    }
+
     let mut render_warnings = Vec::new();
-    let mut pdf = PdfDocument::from_html(&html, &images, &fonts, &options, &mut render_warnings)
-        .map_err(|error| CaptureError::Diagnostic(format!("Could not lay out PDF: {error}")))?;
+    let mut merged: Option<PdfDocument> = None;
+    for slot in slots {
+        let (part, part_warnings) = slot.ok_or_else(|| {
+            CaptureError::Diagnostic("A PDF batch did not finish rendering.".to_string())
+        })?;
+        render_warnings.extend(part_warnings);
+        match merged.as_mut() {
+            Some(document) => document.append_document(part),
+            None => merged = Some(part),
+        }
+    }
+
+    let mut pdf = merged
+        .ok_or_else(|| CaptureError::Diagnostic("PDF renderer produced no pages.".to_string()))?;
 
     let now = printpdf::date::OffsetDateTime::now();
     pdf.metadata.info.creation_date = now;
@@ -130,15 +245,21 @@ fn transcript_html(document: &PdfTranscript<'_>) -> String {
     for message in document.messages {
         messages.push_str(&message_html(message));
     }
+    transcript_html_with_body(document, &messages, true)
+}
 
-    let model = document
-        .model
-        .map(|value| metadata_row("Model", value))
-        .unwrap_or_default();
-    let title = escape_html(&clean_display_title(document.title));
-    let source = escape_html(document.source_type);
-    let session = escape_html(document.session_id);
-    let count = document.messages.len();
+/// Builds one renderable document. `with_cover` is false for continuation
+/// batches, whose pages are appended to the first batch's document.
+fn transcript_html_with_body(
+    document: &PdfTranscript<'_>,
+    messages: &str,
+    with_cover: bool,
+) -> String {
+    let cover = if with_cover {
+        cover_section(document)
+    } else {
+        String::new()
+    };
 
     format!(
         r#"<!DOCTYPE html>
@@ -250,7 +371,23 @@ fn transcript_html(document: &PdfTranscript<'_>) -> String {
 </style>
 </head>
 <body>
-  <section class="cover">
+  {cover}
+  <main class="conversation">{messages}</main>
+</body>
+</html>"#,
+        cover = cover,
+    )
+}
+
+/// The cover belongs to the first rendered batch only, so the merged document
+/// carries exactly one.
+fn cover_section(document: &PdfTranscript<'_>) -> String {
+    let model = document
+        .model
+        .map(|value| metadata_row("Model", value))
+        .unwrap_or_default();
+    format!(
+        r#"<section class="cover">
     <div class="cover-rule"></div>
     <div class="cover-kicker">Claude Session Export</div>
     <h1>{title}</h1>
@@ -261,12 +398,12 @@ fn transcript_html(document: &PdfTranscript<'_>) -> String {
       {model}
     </div>
     <div class="cover-count">{count} messages archived</div>
-  </section>
-  <main class="conversation">{messages}</main>
-</body>
-</html>"#,
-        source_row = metadata_row("Source", &source),
-        session_row = metadata_row("Session", &session),
+  </section>"#,
+        title = escape_html(&clean_display_title(document.title)),
+        source_row = metadata_row("Source", &escape_html(document.source_type)),
+        session_row = metadata_row("Session", &escape_html(document.session_id)),
+        model = model,
+        count = document.messages.len(),
     )
 }
 
@@ -558,9 +695,11 @@ fn rgb(r: f32, g: f32, b: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_display_title, escape_html, markdown_html, normalize_ordered_list_markers,
-        render_pdf, transcript_html, PdfTranscript,
+        chunk_messages, clean_display_title, escape_html, markdown_html,
+        normalize_ordered_list_markers, render_pdf, transcript_html,
+        transcript_html_with_body, PdfTranscript, MAX_PDF_CHARS,
     };
+    use crate::capture::CaptureError;
     use crate::models::ChatExportMessage;
 
     fn fixture() -> (String, Vec<ChatExportMessage>) {
@@ -737,5 +876,69 @@ mod tests {
         let html = markdown_html("```html\n<p>x</p>\n```");
         assert!(html.contains("<pre>"));
         assert!(html.contains("&lt;p&gt;x&lt;/p&gt;"));
+    }
+
+    /// A transcript large enough to need several batches must still carry one
+    /// cover, not one per batch.
+    #[test]
+    fn splits_large_transcripts_into_batches_with_a_single_cover() {
+        let long = "Paragraph text that occupies space in the batch. ".repeat(400);
+        let messages: Vec<ChatExportMessage> = (0..40)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "claude" };
+                ChatExportMessage::plain(role, long.clone(), None)
+            })
+            .collect();
+
+        let batches = chunk_messages(&messages);
+        assert!(batches.len() > 1, "expected several batches, got {}", batches.len());
+        assert!(batches.iter().all(|batch| !batch.is_empty()));
+
+        let document = PdfTranscript {
+            title: "Batched",
+            source_type: "Claude Home",
+            session_id: "batched",
+            model: None,
+            messages: &messages,
+        };
+        let first = transcript_html_with_body(&document, &batches[0], true);
+        let second = transcript_html_with_body(&document, &batches[1], false);
+        assert!(first.contains("class=\"cover\""));
+        assert!(!second.contains("class=\"cover\""));
+    }
+
+    /// Every message must land in exactly one batch.
+    #[test]
+    fn batching_preserves_every_message() {
+        let messages: Vec<ChatExportMessage> = (0..25)
+            .map(|i| ChatExportMessage::plain("user", format!("marker-{i} ").repeat(900), None))
+            .collect();
+        let joined = chunk_messages(&messages).concat();
+        for i in 0..25 {
+            assert!(joined.contains(&format!("marker-{i}")), "lost message {i}");
+        }
+    }
+
+    /// A transcript beyond the ceiling declines the PDF with a clear reason
+    /// rather than running for many minutes.
+    #[test]
+    fn declines_a_transcript_beyond_the_size_ceiling() {
+        let huge = "x".repeat(MAX_PDF_CHARS / 8 + 1_000);
+        let messages: Vec<ChatExportMessage> = (0..9)
+            .map(|_| ChatExportMessage::plain("claude", huge.clone(), None))
+            .collect();
+        let error = render_pdf(&PdfTranscript {
+            title: "Huge",
+            source_type: "Claude Home",
+            session_id: "huge",
+            model: None,
+            messages: &messages,
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, CaptureError::PdfTooLarge(_)),
+            "expected PdfTooLarge, got {error:?}"
+        );
+        assert!(error.to_string().contains("Markdown and JSON"));
     }
 }

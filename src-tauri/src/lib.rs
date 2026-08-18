@@ -2,6 +2,8 @@ mod capture;
 mod filename;
 mod models;
 
+use tauri::Emitter;
+
 use capture::CaptureAdapter;
 use models::{
     AccessibilitySnapshot, ChatExportOptions, ChatExportResult, ClaudeDetection,
@@ -139,6 +141,15 @@ fn sanitize_filename_part(value: String) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // A large export takes minutes, so the pipeline's progress is
+            // forwarded to the window as it happens.
+            let handle = app.handle().clone();
+            capture::progress::set_sink(Box::new(move |update| {
+                let _ = handle.emit("export-progress", update);
+            }));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             detect_claude,
             get_active_session,

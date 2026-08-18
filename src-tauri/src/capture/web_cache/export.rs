@@ -9,6 +9,7 @@ use crate::capture::output::{
     prepare_export_directory, reserve_export_paths, ExportFormats, ExportPaths,
 };
 use crate::capture::pdf::{self, PdfTranscript};
+use crate::capture::progress::{self, ProgressStage};
 use crate::capture::CaptureError;
 use crate::filename::sanitize_filename_part;
 use crate::models::{ChatExportBlock, ChatExportMessage, ChatExportOptions, ChatExportResult};
@@ -35,6 +36,7 @@ pub fn write_export(
     let formats = ExportFormats::from_options(options)?;
     let exports_dir = prepare_export_directory(options.output_directory.as_deref())?;
 
+    progress::report(ProgressStage::ReadingTranscript, 0, 0);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| CaptureError::Diagnostic(error.to_string()))?
@@ -46,22 +48,33 @@ pub fn write_export(
         .transpose()
         .map_err(|error| CaptureError::Diagnostic(error.to_string()))?;
     let markdown = formats.markdown.then(|| render_markdown(document));
+    let mut formats = formats;
     let (pdf_bytes, pdf_warnings) = if formats.pdf {
-        let (bytes, warnings) = pdf::render_pdf(&PdfTranscript {
+        match pdf::render_pdf(&PdfTranscript {
             title: &document.title,
             source_type: &document.source_type,
             session_id: &document.session_id,
             model: document.model.as_deref(),
             messages: &document.messages,
-        })?;
-        (Some(bytes), warnings)
+        }) {
+            Ok((bytes, warnings)) => (Some(bytes), warnings),
+            // An oversized transcript must not cost the user the formats that
+            // did succeed, so the PDF alone is dropped.
+            Err(CaptureError::PdfTooLarge(reason)) => {
+                formats.pdf = false;
+                (None, vec![reason])
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         (None, Vec::new())
     };
+    let formats = formats;
     let paths = reserve_export_paths(&exports_dir, &title, timestamp, formats)?;
 
     // The selected files describe one export, so a partial set is worse than no
     // export. If any write fails, none of the selected files is left behind.
+    progress::report(ProgressStage::WritingFiles, 0, 0);
     let written = write_selected_files(
         &paths,
         markdown.as_deref(),

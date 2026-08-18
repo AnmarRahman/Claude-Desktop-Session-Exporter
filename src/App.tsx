@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
@@ -31,6 +32,19 @@ import type {
   LocalSessionSummary,
   VisibleContentCapture,
 } from "./types";
+
+/// Mirrors the Rust `ExportProgress` payload emitted on "export-progress".
+type ExportProgress = {
+  stage: "reading-transcript" | "rendering-pdf" | "writing-files";
+  completed: number;
+  total: number;
+};
+
+const PROGRESS_LABELS: Record<ExportProgress["stage"], string> = {
+  "reading-transcript": "Reading transcript",
+  "rendering-pdf": "Rendering PDF",
+  "writing-files": "Writing files",
+};
 
 const captureOptions = [
   "User messages",
@@ -104,6 +118,7 @@ function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [exportDirectory, setExportDirectory] = useState(storedExportDirectory);
   const [defaultExportDirectory, setDefaultExportDirectory] = useState("");
+  const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
   const [exportFormats, setExportFormats] = useState<Record<ExportFormat, boolean>>({
     markdown: true,
     json: true,
@@ -301,6 +316,7 @@ function App() {
     setError(null);
     setInspectorError(null);
     setChatExport(null);
+    setExportProgress(null);
     try {
       const options: ChatExportOptions = {
         source: exportSource,
@@ -322,6 +338,7 @@ function App() {
       setInspectorMessage(null);
     } finally {
       setIsExportingChat(false);
+      setExportProgress(null);
     }
   }
 
@@ -397,6 +414,17 @@ function App() {
 
   useEffect(() => {
     void refreshClaudeStatus();
+  }, []);
+
+  // A large transcript takes minutes to lay out, so the backend streams its
+  // progress and the button area shows how far along the export is.
+  useEffect(() => {
+    const pending = listen<ExportProgress>("export-progress", (event) => {
+      setExportProgress(event.payload);
+    });
+    return () => {
+      void pending.then((unlisten) => unlisten());
+    };
   }, []);
 
   // The default lives in the user's home, so only the backend knows its path.
@@ -686,6 +714,51 @@ function App() {
               <span>Retry</span>
             </button>
           </div>
+
+          {isExportingChat && exportProgress && (
+            <div
+              className="export-progress"
+              role="status"
+              aria-live="polite"
+              aria-label={`${PROGRESS_LABELS[exportProgress.stage]} in progress`}
+            >
+              <div className="export-progress-head">
+                <span>{PROGRESS_LABELS[exportProgress.stage]}</span>
+                {exportProgress.total > 0 && (
+                  <span className="muted">
+                    {exportProgress.completed} / {exportProgress.total}
+                  </span>
+                )}
+              </div>
+              <div
+                className="export-progress-track"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={exportProgress.total || undefined}
+                aria-valuenow={exportProgress.total ? exportProgress.completed : undefined}
+              >
+                <div
+                  className={
+                    exportProgress.total > 0
+                      ? "export-progress-fill"
+                      : "export-progress-fill indeterminate"
+                  }
+                  style={
+                    exportProgress.total > 0
+                      ? {
+                          width: `${Math.round(
+                            (exportProgress.completed / exportProgress.total) * 100,
+                          )}%`,
+                        }
+                      : undefined
+                  }
+                />
+              </div>
+              <p className="muted">
+                A long transcript can take several minutes. The window stays responsive.
+              </p>
+            </div>
+          )}
 
           {chatExport && (
             <div className="export-success" role="status" aria-live="polite">
