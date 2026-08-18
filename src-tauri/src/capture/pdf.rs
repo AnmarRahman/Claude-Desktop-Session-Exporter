@@ -10,6 +10,7 @@ use printpdf::{
 };
 use pulldown_cmark::{html, Event, Options, Parser};
 
+use crate::capture::output::truncate_activity;
 use crate::capture::progress::{self, ProgressStage};
 use crate::capture::CaptureError;
 use crate::models::{ChatExportBlock, ChatExportMessage};
@@ -483,10 +484,13 @@ fn block_html(block: &ChatExportBlock) -> String {
             let mut body = if text.is_empty() {
                 String::new()
             } else {
-                markdown_html(text)
+                markdown_html(&truncate_activity(text))
             };
             if let Some(input) = &block.tool_input {
-                body.push_str(&format!("<pre>{}</pre>", escape_html(input)));
+                body.push_str(&format!(
+                    "<pre>{}</pre>",
+                    escape_html(&truncate_activity(input))
+                ));
             }
             format!(
                 "<aside class=\"activity{error_class}\"><div class=\"activity-label\">{label} - {name}</div>{body}</aside>"

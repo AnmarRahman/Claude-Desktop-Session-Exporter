@@ -54,6 +54,22 @@ impl ExportPaths {
     }
 }
 
+/// Longest tool payload kept in the human-readable Markdown and PDF renders.
+/// Real transcripts carry single tool results over 200 KB — whole meeting
+/// transcripts, entire generated files — which are unreadable on a page and
+/// dominate the export. The complete payload is still preserved in the JSON.
+pub const MAX_ACTIVITY_CHARS: usize = 1_200;
+
+/// Shortens an oversized tool payload on a character boundary and says so.
+pub fn truncate_activity(text: &str) -> String {
+    if text.chars().count() <= MAX_ACTIVITY_CHARS {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(MAX_ACTIVITY_CHARS).collect();
+    let dropped = text.chars().count() - MAX_ACTIVITY_CHARS;
+    format!("{kept}\n\n[... {dropped} more characters; the full payload is in the JSON export ...]")
+}
+
 /// Claims a basename so concurrent or same-second exports never overwrite one another.
 pub fn reserve_export_paths(
     exports_dir: &Path,
@@ -284,5 +300,31 @@ mod tests {
 
         paths.remove_files();
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A short payload is untouched; a long one is cut and says what is missing.
+    #[test]
+    fn truncates_only_oversized_activity_payloads() {
+        use super::{truncate_activity, MAX_ACTIVITY_CHARS};
+
+        let short = "small payload";
+        assert_eq!(truncate_activity(short), short);
+
+        let long = "x".repeat(MAX_ACTIVITY_CHARS + 500);
+        let cut = truncate_activity(&long);
+        assert!(cut.len() < long.len());
+        assert!(cut.contains("500 more characters"));
+        assert!(cut.contains("JSON export"));
+    }
+
+    /// Truncation counts characters, so it must not split a multi-byte one.
+    #[test]
+    fn truncates_multibyte_text_without_panicking() {
+        use super::{truncate_activity, MAX_ACTIVITY_CHARS};
+
+        let long = "é".repeat(MAX_ACTIVITY_CHARS + 10);
+        let cut = truncate_activity(&long);
+        assert!(cut.starts_with('é'));
+        assert!(cut.contains("10 more characters"));
     }
 }

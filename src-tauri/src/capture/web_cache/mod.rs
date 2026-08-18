@@ -359,7 +359,7 @@ pub fn export_web_conversation(
 
     let normalize = conversation::NormalizeOptions {
         include_thinking: options.include_thinking.unwrap_or(false),
-        include_tools: options.include_tools.unwrap_or(true),
+        include_tools: options.include_tools.unwrap_or(false),
     };
 
     let mut failures = Vec::new();

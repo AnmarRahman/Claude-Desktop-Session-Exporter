@@ -66,10 +66,10 @@ const exportFormatOptions: Array<{ key: ExportFormat; label: string; description
 
 type ContentOption = "tools" | "thinking";
 
-/// Tool activity dominates the size of a long transcript — on one real 442
-/// message chat it was 86% of the export — so it is worth turning off.
+/// Tool activity dominates a long transcript: on one real 471-message chat the
+/// raw tool payloads were 85% of the export, so both are off by default.
 const contentOptions: Array<{ key: ContentOption; label: string; description: string }> = [
-  { key: "tools", label: "Tool activity", description: "Tool calls, results, and Cowork activity" },
+  { key: "tools", label: "Tool activity", description: "Raw tool calls and results; usually most of the file" },
   { key: "thinking", label: "Thinking blocks", description: "Claude's reasoning, when stored" },
 ];
 
@@ -133,9 +133,10 @@ function App() {
     json: true,
     pdf: true,
   });
-  // Mirrors the backend defaults: activity is kept, reasoning is not.
+  // Both off by default: on real transcripts these raw payloads are the large
+  // majority of the export and are not part of the conversation.
   const [contentIncludes, setContentIncludes] = useState<Record<ContentOption, boolean>>({
-    tools: true,
+    tools: false,
     thinking: false,
   });
   const [developerMode, setDeveloperMode] = useState(false);
@@ -631,8 +632,8 @@ function App() {
             <div>
               <p className="label">Included content</p>
               <p className="muted">
-                Tool activity is usually the bulk of a long transcript. Turn it off for a much
-                smaller export.
+                Off by default. Tool payloads were 85% of one real 471-message chat, and long ones
+                are shortened in Markdown and PDF — the JSON always keeps them in full.
               </p>
             </div>
             <div className="format-grid">

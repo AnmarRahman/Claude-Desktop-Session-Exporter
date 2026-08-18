@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::capture::output::{
-    prepare_export_directory, reserve_export_paths, ExportFormats, ExportPaths,
+    prepare_export_directory, reserve_export_paths, truncate_activity, ExportFormats, ExportPaths,
 };
 use crate::capture::pdf::{self, PdfTranscript};
 use crate::capture::progress::{self, ProgressStage};
@@ -182,10 +182,10 @@ fn render_block(block: &ChatExportBlock) -> String {
                 block.tool_name.as_deref().unwrap_or("unknown")
             );
             if !text.is_empty() {
-                section.push_str(&format!("_{text}_\n\n"));
+                section.push_str(&format!("_{}_\n\n", truncate_activity(text)));
             }
             if let Some(input) = &block.tool_input {
-                section.push_str(&fenced(input, "json"));
+                section.push_str(&fenced(&truncate_activity(input), "json"));
             }
             section
         }
@@ -200,11 +200,11 @@ fn render_block(block: &ChatExportBlock) -> String {
                 block.tool_name.as_deref().unwrap_or("unknown")
             );
             if !text.is_empty() {
-                section.push_str(&fenced(text, ""));
+                section.push_str(&fenced(&truncate_activity(text), ""));
             }
             if let Some(raw) = &block.raw {
                 section.push_str("_Result items this build cannot render:_\n\n");
-                section.push_str(&fenced(raw, "json"));
+                section.push_str(&fenced(&truncate_activity(raw), "json"));
             }
             section
         }
