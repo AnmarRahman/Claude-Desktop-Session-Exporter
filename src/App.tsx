@@ -64,6 +64,15 @@ const exportFormatOptions: Array<{ key: ExportFormat; label: string; description
   { key: "pdf", label: "PDF", description: "Formatted document for sharing" },
 ];
 
+type ContentOption = "tools" | "thinking";
+
+/// Tool activity dominates the size of a long transcript — on one real 442
+/// message chat it was 86% of the export — so it is worth turning off.
+const contentOptions: Array<{ key: ContentOption; label: string; description: string }> = [
+  { key: "tools", label: "Tool activity", description: "Tool calls, results, and Cowork activity" },
+  { key: "thinking", label: "Thinking blocks", description: "Claude's reasoning, when stored" },
+];
+
 function formatList(items: string[]): string {
   if (items.length < 2) return items[0] ?? "";
   if (items.length === 2) return `${items[0]} and ${items[1]}`;
@@ -123,6 +132,11 @@ function App() {
     markdown: true,
     json: true,
     pdf: true,
+  });
+  // Mirrors the backend defaults: activity is kept, reasoning is not.
+  const [contentIncludes, setContentIncludes] = useState<Record<ContentOption, boolean>>({
+    tools: true,
+    thinking: false,
   });
   const [developerMode, setDeveloperMode] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -322,6 +336,8 @@ function App() {
         source: exportSource,
         conversation_id: exportSource === "auto" ? undefined : selectedLocalSession?.cli_session_id,
         output_directory: exportDirectory || undefined,
+        include_tools: contentIncludes.tools,
+        include_thinking: contentIncludes.thinking,
         export_markdown: exportFormats.markdown,
         export_json: exportFormats.json,
         export_pdf: exportFormats.pdf,
@@ -608,6 +624,40 @@ function App() {
                   </label>
                 );
               })}
+            </div>
+          </div>
+
+          <div className="export-format-options">
+            <div>
+              <p className="label">Included content</p>
+              <p className="muted">
+                Tool activity is usually the bulk of a long transcript. Turn it off for a much
+                smaller export.
+              </p>
+            </div>
+            <div className="format-grid">
+              {contentOptions.map((option) => (
+                <label
+                  key={option.key}
+                  className={`format-option${contentIncludes[option.key] ? " selected" : ""}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={contentIncludes[option.key]}
+                    disabled={isExportingChat || pendingConfirm !== null}
+                    onChange={() =>
+                      setContentIncludes((current) => ({
+                        ...current,
+                        [option.key]: !current[option.key],
+                      }))
+                    }
+                  />
+                  <span>
+                    <strong>{option.label}</strong>
+                    <small>{option.description}</small>
+                  </span>
+                </label>
+              ))}
             </div>
           </div>
 
