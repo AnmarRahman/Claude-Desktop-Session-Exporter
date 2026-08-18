@@ -8,7 +8,7 @@ use printpdf::{
     Base64OrRaw, BuiltinFont, Color, GeneratePdfOptions, Op, PdfDocument, PdfFontHandle,
     PdfSaveOptions, Point, Pt, Rgb, TextItem,
 };
-use pulldown_cmark::{html, Options, Parser};
+use pulldown_cmark::{html, Event, Options, Parser};
 
 use crate::capture::CaptureError;
 use crate::models::{ChatExportBlock, ChatExportMessage};
@@ -78,9 +78,12 @@ pub fn render_pdf(document: &PdfTranscript<'_>) -> Result<(Vec<u8>, Vec<String>)
     }
 
     if !render_warnings.is_empty() {
+        // Carry the first few messages through: a bare count gives the user
+        // nothing to act on and hides real layout failures.
         warnings.push(format!(
-            "PDF layout reported {} non-fatal warning(s).",
-            render_warnings.len()
+            "PDF layout reported {} non-fatal warning(s): {}",
+            render_warnings.len(),
+            summarize_warnings(&render_warnings)
         ));
     }
 
@@ -98,11 +101,28 @@ pub fn render_pdf(document: &PdfTranscript<'_>) -> Result<(Vec<u8>, Vec<String>)
     }
     if !save_warnings.is_empty() {
         warnings.push(format!(
-            "PDF writer reported {} non-fatal warning(s).",
-            save_warnings.len()
+            "PDF writer reported {} non-fatal warning(s): {}",
+            save_warnings.len(),
+            summarize_warnings(&save_warnings)
         ));
     }
     Ok((bytes, warnings))
+}
+
+/// Keeps the first few renderer messages so a failed layout is diagnosable
+/// from the app instead of only reporting how many warnings occurred.
+fn summarize_warnings(warnings: &[printpdf::PdfWarnMsg]) -> String {
+    const SHOWN: usize = 3;
+    let mut summary = warnings
+        .iter()
+        .take(SHOWN)
+        .map(|warning| warning.msg.trim().to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if warnings.len() > SHOWN {
+        summary.push_str(&format!(" (+{} more)", warnings.len() - SHOWN));
+    }
+    summary
 }
 
 fn transcript_html(document: &PdfTranscript<'_>) -> String {
@@ -394,7 +414,16 @@ fn markdown_html(markdown: &str) -> String {
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_TASKLISTS);
-    let parser = Parser::new_ext(&markdown, options);
+    // Raw HTML in a message must never reach the renderer as markup. A chat can
+    // legitimately contain a whole `<!DOCTYPE html>` document, and printpdf's HTML
+    // bridge treats a nested document as a replacement for the real one, so the
+    // export collapses to an empty page. Showing the source as text keeps the
+    // content and the layout. Fenced code is unaffected: it arrives as `Text`.
+    let parser = Parser::new_ext(&markdown, options).map(|event| match event {
+        Event::Html(raw) => Event::Text(raw),
+        Event::InlineHtml(raw) => Event::Text(raw),
+        other => other,
+    });
     let mut output = String::new();
     html::push_html(&mut output, parser);
     output
@@ -656,5 +685,57 @@ mod tests {
         })
         .unwrap();
         std::fs::write(output, bytes).unwrap();
+    }
+
+    /// A chat can contain a whole HTML document. Passed through as markup it
+    /// replaces the real document and the export collapses to a blank page.
+    #[test]
+    fn renders_a_message_containing_a_full_html_document() {
+        let messages = vec![
+            ChatExportMessage::plain("user", "Show me a page.".to_string(), None),
+            ChatExportMessage::plain(
+                "claude",
+                "<!DOCTYPE html><html><body><p>hi</p></body></html>".to_string(),
+                None,
+            ),
+            ChatExportMessage::plain(
+                "claude",
+                "Tail content that must survive the payload.".repeat(40),
+                None,
+            ),
+        ];
+        let (bytes, warnings) = render_pdf(&PdfTranscript {
+            title: "Raw HTML",
+            source_type: "Claude Home",
+            session_id: "raw-html",
+            model: None,
+            messages: &messages,
+        })
+        .unwrap();
+
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(
+            bytes.len() > 20_000,
+            "a full-document payload blanked the PDF: {} bytes",
+            bytes.len()
+        );
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    /// Raw HTML becomes visible source text rather than markup.
+    #[test]
+    fn escapes_raw_html_instead_of_emitting_it() {
+        let html = markdown_html("Inline <div class=\"x\"> and <br> tags.");
+        assert!(html.contains("&lt;div"));
+        assert!(html.contains("&lt;br&gt;"));
+        assert!(!html.contains("<div"));
+    }
+
+    /// Fenced code must keep working: it never arrives as an HTML event.
+    #[test]
+    fn still_renders_fenced_code_blocks() {
+        let html = markdown_html("```html\n<p>x</p>\n```");
+        assert!(html.contains("<pre>"));
+        assert!(html.contains("&lt;p&gt;x&lt;/p&gt;"));
     }
 }
